@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ from hw1_imitation.data import (
     load_pusht_zarr,
 )
 from hw1_imitation.model import build_policy, PolicyType
-from hw1_imitation.evaluation import Logger
+from hw1_imitation.evaluation import Logger, evaluate_policy
 
 LOGDIR_PREFIX = "exp"
 
@@ -118,6 +119,19 @@ def run_training(config: TrainConfig) -> None:
         hidden_dims=config.hidden_dims,
     ).to(device)
 
+    # torch.compile 编译网络前向以加速训练步(首次前向有一次编译预热,之后更快)。
+    # 编译的是 self.net —— 两个策略的 compute_loss / sample_actions 都走它,通用。
+    # 做一次探测前向触发编译;若本机编译后端不可用(如缺 CUDA 工具链)则回退未编译,保证能跑。
+    net_in_features = model.net[0].in_features
+    _compiled_net = torch.compile(model.net)
+    try:
+        with torch.no_grad():
+            _compiled_net(torch.zeros(2, net_in_features, device=device))
+        model.net = _compiled_net
+        print("torch.compile enabled")
+    except Exception as exc:  # noqa: BLE001
+        print(f"torch.compile unavailable, using eager mode ({type(exc).__name__})")
+
     exp_name = f"seed_{config.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if config.exp_name is not None:
         exp_name += f"_{config.exp_name}"
@@ -127,7 +141,70 @@ def run_training(config: TrainConfig) -> None:
     )
     logger = Logger(log_dir)
 
-    ### TODO: PUT YOUR MAIN TRAINING LOOP HERE ###
+    # 优化器:Adam(Kingma 2014)根据梯度更新 model 的所有可训练参数(即 self.net 的权重)。
+    # model.parameters() 由 nn.Module 自动收集;lr / weight_decay 来自 config。
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay
+    )
+
+    step = 0  # 全局训练步数(跨 epoch 累加),用于控制 log / eval 的节奏
+    last_log_time = time.perf_counter()  # 用于估算训练速度(步/秒)
+    for epoch in range(config.num_epochs):
+        for state, action_chunk in loader:  # DataLoader 每次给一个 batch
+            model.train()  # 训练模式(evaluate_policy 会切成 eval,这里切回来)
+
+            # 数据搬到 model 所在设备(CPU/GPU 必须一致)。
+            state = state.to(device)
+            action_chunk = action_chunk.to(device)
+
+            # —— 核心四步:算 loss → 清梯度 → 反传 → 更新参数 ——
+            loss = model.compute_loss(state, action_chunk)  # 你在 model.py 写的
+            optimizer.zero_grad()  # 清掉上一步的梯度(PyTorch 默认累加)
+            loss.backward()        # 反向传播,算出每个参数的梯度
+            optimizer.step()       # 用梯度更新参数(self.net 权重在这里被改)
+
+            # 定期记录训练 loss + 训练速度(logger.log 会同时写 CSV + wandb)。
+            if step % config.log_interval == 0:
+                now = time.perf_counter()
+                # 步/秒:自上次记录以来的平均速度(step 0 还没区间,记 0)。
+                sps = 0.0 if step == 0 else config.log_interval / (now - last_log_time)
+                last_log_time = now
+                logger.log(
+                    {"train/loss": loss.item(), "train/steps_per_sec": sps}, step=step
+                )
+                print(
+                    f"epoch {epoch}  step {step}  loss {loss.item():.4f}  ({sps:.0f} steps/s)"
+                )
+
+            # 定期在真实 Push-T 环境里评测(跑 rollout、录视频、存 checkpoint)。
+            # 跳过 step 0(此时模型还没训,评测又慢),训练结束后再补一次最终评测。
+            if step > 0 and step % config.eval_interval == 0:
+                evaluate_policy(
+                    model,
+                    normalizer,
+                    device,
+                    chunk_size=config.chunk_size,
+                    video_size=config.video_size,
+                    num_video_episodes=config.num_video_episodes,
+                    flow_num_steps=config.flow_num_steps,
+                    step=step,
+                    logger=logger,
+                )
+
+            step += 1
+
+    # 训练结束后再评测一次,确保拿到最终模型的成绩(供打分)。
+    evaluate_policy(
+        model,
+        normalizer,
+        device,
+        chunk_size=config.chunk_size,
+        video_size=config.video_size,
+        num_video_episodes=config.num_video_episodes,
+        flow_num_steps=config.flow_num_steps,
+        step=step,
+        logger=logger,
+    )
 
     logger.dump_for_grading()
 
