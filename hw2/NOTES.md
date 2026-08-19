@@ -15,7 +15,7 @@
 | 阶段 | PDF 节 | 动的文件 | commit | 状态 |
 |---|---|---|---|---|
 | 0. 数据流打通 | —（前置） | `run.py` `utils.py` `policies.py` | `b14695f` | ✅ |
-| 1. Vanilla PG | §3 | `pg_agent.py` `policies.py` | | 🔄 2/8 |
+| 1. Vanilla PG | §3 | `pg_agent.py` `policies.py` | | 🔄 6/8 |
 | 2. Baseline   | §4 | `critics.py` `pg_agent.py` | | ☐ |
 | 3. GAE        | §5 | `pg_agent.py` | | ☐ |
 | 4. 调参       | §6 | 无代码改动 | — | ☐ |
@@ -107,10 +107,10 @@ logstd 为什么存 log、itertools.chain 收参数、exp 与 softmax 的分工�
 
 - [x] `pg_agent.py` `_discounted_return` —— PDF 式 (25) ✅ 已验证
 - [x] `pg_agent.py` `_discounted_reward_to_go` —— PDF 式 (26) ✅ 已验证
-- [ ] `pg_agent.py` `_calculate_q_vals` 两个分支
-- [ ] `pg_agent.py` `update` step 1.5：flatten
-- [ ] `pg_agent.py` `_estimate_advantage`：`critic is None` 分支
-- [ ] `pg_agent.py` `_estimate_advantage`：advantage 归一化
+- [x] `pg_agent.py` `_calculate_q_vals` 两个分支 ✅ 已验证
+- [x] `pg_agent.py` `update` step 1.5：flatten ✅ 已验证
+- [x] `pg_agent.py` `_estimate_advantage`：`critic is None` 分支 ✅ 已验证
+- [x] `pg_agent.py` `_estimate_advantage`：advantage 归一化 ✅ 已验证
 - [ ] `pg_agent.py` `update` step 3：调用 actor.update
 - [ ] `policies.py` `MLPPolicyPG.update`：loss + optimizer step
 
@@ -140,6 +140,23 @@ G_t = Σ_{t'=t} γ^(t'-t) r_t'
 **返回 `np.ndarray` 而不是 list**：下游 `update` 里要 `np.concatenate`，
 直接给 ndarray 省一次转换。dtype 不用纠结，`ptu.from_numpy` 里有 `.float()` 会统一。
 
+**flatten 必须在 `_calculate_q_vals` 之后**：Q 值要按轨迹逐条算（折扣指数是轨迹内的），
+一旦 `rewards` 被 `np.concatenate` 拍平，轨迹边界就丢了。
+验证方式：3 条长度 `[4,2,3]` 的轨迹、γ=1、reward 全 1，
+正确结果是 `[4,3,2,1, 2,1, 3,2,1]`（每条各自重新数）；
+若顺序颠倒会得到 `[9,8,7,...,1]`。
+
+**拍平抹掉的只是「数组布局上的边界」**，语义边界被搬进了 `terminals`
+（`terminals[i]==1` 表示第 i 行是所在轨迹最后一步）。
+阶段 1/2 不需要它 —— 非 GAE 分支里 `rewards` 和 `terminals` 两个参数压根没被引用；
+阶段 3 的 GAE 递推 `A_t = δ_t + γλ·A_{t+1}` 要看下一时间步，就必须靠 `terminals` 断开。
+
+**无 baseline 时 `advantages = q_values`**，不是「减去一个常数 b」。
+本作业的 baseline 特指 §4 学出来的 `V_φ(s)`，`use_baseline=False` 就是它不存在。
+不过常数基线的效果确实存在 —— 在 `-na` 里：`(A-μ)/(σ+ε)` 减掉的 μ 就是一个常数基线。
+这正是 PDF §4.2 说「advantage normalization 让简单环境不再需要 baseline」的由来。
+差别：减真常数 b 无偏；减 batch 均值 μ 技术上有偏（μ 依赖采样到的这批数据，PDF §2.3）。
+
 ### 验证记录
 
 用 AST 从文件里抽出这两个方法单独执行（不需要装 torch），四组用例全过：
@@ -155,17 +172,47 @@ G_t = Σ_{t'=t} γ^(t'-t) r_t'
 `[1,1,1]` 那组反而验不出来 —— 写错成绝对指数也能蒙对。
 长度为 1 那组验证了 `running = 0.0` 的边界处理。
 
+`_calculate_q_vals` / flatten / 归一化的验证（同样用 AST 抽方法执行，`_estimate_advantage`
+和 actor 用桩替代）：
+
+| 检查 | 结果 |
+|---|---|
+| 不等长轨迹 `[1,1,1]`/`[1,1]`，γ=1 | Case1 `[[3,3,3],[2,2]]`、Case2 `[[3,2,1],[2,1]]` ✅ |
+| γ=0.5 同样两条 | 第二条 Case1 得 `1.5` 而非接着 γ³ 累加 → 轨迹间不串扰 ✅ |
+| flatten 后形状（3 条 `[4,2,3]`，ob_dim=4） | `obs (9,4)`、其余 `(9,)` ✅ |
+| flatten 后 q_values | `[4,3,2,1,2,1,3,2,1]` → 边界未串 ✅ |
+| 归一化 `[1,2,3,4]` | `mean=0, std=1` ✅ |
+| 归一化退化情形 `[7,7,7,7]`（std=0） | 得 `[0,0,0,0]`，未出现 NaN/inf ✅ |
+
 ### 踩的坑
 
-<!-- 模板，每个坑复制一份
-#### 坑名
-- **症状**：（报错信息 / 曲线不动 / assert 挂了 / 数值 NaN）
-- **原因**：
-- **改法**：
-- **教训**：（hw3 的 SAC、hw5 的策略网络会不会再撞一次？）
--->
+#### 坑 1：把整个 `list[array]` 喂给了只吃单条轨迹的 helper
 
-> TODO
+- **症状**：`_calculate_q_vals` 里写成 `self._discounted_return(rewards=rewards)`，
+  用两条不等长轨迹 `[[1,1,1], [1,1]]` 一跑就崩：
+  ```
+  Case 1  ValueError: operands could not be broadcast together with shapes (3,) (2,)
+  Case 2  ValueError: setting an array element with a sequence.
+  ```
+- **原因**：**类型标注差了一层嵌套**。
+  ```python
+  def _discounted_reward_to_go(self, rewards: Sequence[float])       # 一条轨迹
+  def _calculate_q_vals(self,        rewards: Sequence[np.ndarray])  # 一堆轨迹
+  ```
+  helper 里 `T = len(rewards)` 算出来是**轨迹条数**而不是时间步数，
+  `rewards[t]` 取出来是一整个 array 而不是一个 float，
+  于是 `out[t] = running` 变成「把数组塞进标量位置」。
+- **改法**：剥一层，用列表推导式逐条应用：
+  ```python
+  q_values = [self._discounted_return(single_reward_traj) for single_reward_traj in rewards]
+  ```
+- **教训**：
+  1. 遇到形状类报错，**先对比上下游函数的类型标注**，`Sequence[float]` vs
+     `Sequence[np.ndarray]` 这种一层之差最容易看漏。
+  2. 这次运气好崩了。如果两条轨迹**碰巧等长**，Case 1 不会报错，而是静默算出
+     折扣指数跨轨迹累加的错误结果 —— 所以验证用例必须用**不等长**轨迹。
+  3. hw3 处理 batch 时大概率还会见到
+     `setting an array element with a sequence`，症状→根因的诊断路径同样适用。
 
 ### 遗留疑问
 
