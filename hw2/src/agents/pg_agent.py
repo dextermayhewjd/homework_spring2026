@@ -94,14 +94,41 @@ class PGAgent(nn.Module):
         Note that all entries of the output list should be the exact same because each sum is from 0 to T (and doesn't
         involve t)!
         """
-        return None
+        # T = len(rewards)
+        # for t in range(T):
+        #     total += self.gamma **t * rewards[t]
+        # return np.full(T,total,dtype=np.float32) 
+        
+        '''
+        这里是两种写法两种都可以，sum是直接会把一整个数列的全部求和 可以直接吃一个生成表达式
+        '''
+        
+        T = len(rewards)
+        total = sum (self.gamma ** t * r for t, r in enumerate(rewards))
+        return np.full(T,total,dtype = np.float32)
+        
+        # return None
 
     def _discounted_reward_to_go(self, rewards: Sequence[float]) -> Sequence[float]:
         """
         Helper function which takes a list of rewards {r_0, r_1, ..., r_t', ... r_T} and returns a list where the entry
         in each index t is sum_{t'=t}^T gamma^(t'-t) * r_{t'}.
         """
-        return None
+        
+        '''
+        因为这里需要考虑算法复杂度，那么可以从末尾开始算
+        '''
+        
+        T = len(rewards)
+        out = np.zeros(T,dtype=np.float32) 
+        running = 0.0
+        for t in reversed(range(T)):
+            running = rewards[t] + self.gamma * running
+            out[t] = running
+        
+        return out
+        
+        # return None
 
     def _calculate_q_vals(self, rewards: Sequence[np.ndarray]) -> Sequence[np.ndarray]:
         """Monte Carlo estimation of the Q function."""
