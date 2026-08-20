@@ -9,3 +9,6 @@ dist/
 .ruff_cache/
 
 exp/
+
+exp_stdout/
+REPORT.pdf

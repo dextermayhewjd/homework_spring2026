@@ -102,10 +102,15 @@ def setup_wandb(
     project='project',
     group=None,
     name=None,
-    mode='online',
+    mode=None,
     config=None,
 ):
     """Set up Weights & Biases for logging."""
+    # mode 未显式指定时，读 WANDB_MODE 环境变量（online / offline / disabled），默认 online。
+    # 原本这里写死 'online'，会覆盖环境变量，导致没登录时直接崩。
+    if mode is None:
+        mode = os.environ.get('WANDB_MODE', 'online')
+
     wandb_output_dir = tempfile.mkdtemp()
     tags = [group] if group is not None else None
 

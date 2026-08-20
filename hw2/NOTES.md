@@ -5,6 +5,11 @@
 > **不记什么**：
 > - 「最终代码为什么长这样」→ 写进源文件 docstring，沿用 hw1 的三段式（*做的事 / 为什么 / 术语解释*）
 > - 「跑了什么、结果多少」→ 写进 `REPORT.md`
+> - 「数学公式怎么机械地翻译成 PyTorch 代码」→ 写进 `FORMULA_TO_CODE.md`，
+>   那是跨作业复用的流程（hw3/hw4/final project 会再用），不该埋在 hw2 的某个阶段里
+> - 「张量形状/轴怎么想、哪些形状错误不报错」→ 写进 `SHAPES.md`，同样是跨作业复用的
+> - 「方差为什么是策略梯度的核心问题」→ 写进 `VARIANCE.md`，一个可枚举的小例子 +
+>   本作业四种方差削减技巧的对照表，同样跨作业复用
 >
 > 分界线：**读最终代码的人需要知道的** 留在代码里；**只有写代码的我经历过的** 留在这里。
 
@@ -15,13 +20,17 @@
 | 阶段 | PDF 节 | 动的文件 | commit | 状态 |
 |---|---|---|---|---|
 | 0. 数据流打通 | —（前置） | `run.py` `utils.py` `policies.py` | `b14695f` | ✅ |
-| 1. Vanilla PG | §3 | `pg_agent.py` `policies.py` | | 🔄 6/8 |
+| 1. Vanilla PG | §3 | `pg_agent.py` `policies.py` | `839e29c` `b049f09` +本次 | ✅ 8/8 |
 | 2. Baseline   | §4 | `critics.py` `pg_agent.py` | | ☐ |
 | 3. GAE        | §5 | `pg_agent.py` | | ☐ |
 | 4. 调参       | §6 | 无代码改动 | — | ☐ |
 
 > 三个阶段动的代码不重叠，**一个阶段一个 commit**。这样 `git log -p` 本身就是一份
 > 精确到行的实现过程记录，零额外成本。写完一个阶段跑一次 `smart-commit`。
+>
+> **实际执行时阶段 1 跨了三个 commit**（两个 estimator / 6-of-8 / 收尾+实验），
+> 因为中途停下来补了理论推导和实验。约定没守住，但 `git log -p -- hw2/src` 仍然是完整记录，
+> 不改历史。阶段 2、3 争取守住。
 
 ---
 
@@ -91,8 +100,10 @@ logstd 为什么存 log、itertools.chain 收参数、exp 与 softmax 的分工�
 
 ### 遗留问题
 
-- [ ] `run.py`、`utils.py`、`policies.py` 里共有 8 条已完成但没删的 stale TODO 注释。
-      之后 `grep -rn TODO` 数剩余工作量时会被干扰（24 条里只有 16 条是真活）
+- [ ] 已完成但没删的 stale TODO 注释。截至阶段 1 结束重新数过：
+      **`grep -rn TODO src/` 共 23 条，其中只有 8 条是真活**（阶段 2 的 6 条 + 阶段 3 的 2 条），
+      另外 15 条是 stale（`run.py` 2 / `utils.py` 3 / `policies.py` 5 / `pg_agent.py` 5）。
+      用 TODO 数估剩余工作量会高估近 3 倍。清理留到全部做完，免得和 starter code 的 diff 太乱。
 
 ---
 
@@ -157,6 +168,153 @@ G_t = Σ_{t'=t} γ^(t'-t) r_t'
 这正是 PDF §4.2 说「advantage normalization 让简单环境不再需要 baseline」的由来。
 差别：减真常数 b 无偏；减 batch 均值 μ 技术上有偏（μ 依赖采样到的这批数据，PDF §2.3）。
 
+
+
+**PDF 给的是梯度，代码里却必须写 loss —— 这个转换是我自己造的，不是抄的**
+
+PDF 从式 (4) 一路到式 (22) 给的全是 `∇θ J(θ)`，**通篇没有出现过 actor 的 loss**
+（`pdftotext` 后 grep 整份 PDF，唯一一处 "loss" 是 §4.2 要求画 baseline loss 曲线）。
+不是它省略了 —— 策略梯度在数学上本来就没有 loss。
+
+loss 是被 PyTorch 的 API 形状倒逼出来的。autodiff 只有一个入口：
+
+```
+标量.backward()  →  填好每个 θ.grad  →  optimizer.step() 做 θ ← θ - α·θ.grad
+```
+
+它**只会**「对一个标量求导」这一件事，而我手里是一个**已经求好的梯度公式**，
+根本不需要它帮我求导。于是只能倒着造一个标量，骗过这个 API。
+
+**反推过程**：要的是梯度上升 `θ ← θ + α∇J`，而 `step()` 做的是减法，
+所以需要一个 L 满足 `∇L = -∇J`。代入式 (8)：
+
+```
+∇J ≈ (1/N) Σ_i Σ_t  ∇log π(a|s) · A
+```
+
+关键在于 **A 与 θ 无关** —— 它是从已采样数据算出的固定数字，
+代码里更是 numpy 转回来的，计算图早断了。既然是常数，`∇` 就能提到求和外面：
+
+```
+(1/N) Σ ∇log π · A  ==  ∇[ (1/N) Σ log π · A ]
+                          └────── 这就是要造的标量 ──────┘
+```
+
+取负号即得 `loss = -(log_prob * advantages).mean()`。
+
+这东西叫 **surrogate loss（代理损失）**：**只有梯度有意义，数值本身毫无意义**。
+它不是预测误差，不是任何东西的上界，训练成功时也不保证下降。
+
+三个可验证的推论，都能在本仓库里对上：
+
+| 推论 | 证据 |
+|---|---|
+| `REPORT.md` 全文没要过 actor loss 曲线 | §1.2/§3.2 要的都是 return 曲线；只有 §2.2 要 baseline loss —— 后者是**真**回归损失，该降；前者涨跌都说明不了事 |
+| actor 一个 batch 只更新 **1** 次，critic 更新 **5** 次 | `pg_agent.py:82` vs `pg_agent.py:87`（`-bgs` 默认 5） |
+| 训练正常时 Actor Loss 经常在**涨** | 别拿它 debug，看 `Eval_AverageReturn` |
+
+第二条的原因值得单独记：`∇L = -∇J` **只在当前 θ、当前这批数据下成立**。
+数据是用旧的 π_θ 采的，θ 一动等式就失效，所以走一步就必须重新采样。
+critic 那边是真回归损失，同一批数据反复用没问题，所以能走 5 步。
+（想在一批数据上多走几步又不出错，就得加重要性采样修正 —— 那就是 PPO。）
+
+**与 hw1 的推导方向正好相反**
+
+| | hw1 行为克隆 | hw2 策略梯度 |
+|---|---|---|
+| 先有的是 | **loss**（MSE，真实存在的目标） | **梯度**（式 6，log-derivative trick 推出来的） |
+| 推导方向 | 目标 → 求导 → 梯度 | 梯度 → 反推 → 一个假目标 |
+| loss 数值 | 有意义，该降 | 无意义，别看 |
+
+`hw1/src/hw1_imitation/train.py:160-164` 的「算 loss → zero_grad → backward → step」
+四步骨架和这里一模一样，但那边 `compute_loss` 是**真在算损失**，
+这里的 loss 是**在拼一个梯度容器**。代码像，语义完全不同。
+
+**边界澄清**（别把话说过头）：`J(θ) = E_{τ~π_θ}[r(τ)]` 是真实存在的目标函数，
+只是**在代码里写不出可微表达式** —— θ 藏在采样分布里，而不是被求和的数值里，
+这正是式 (4)→(6) 那个 log-derivative trick 要解决的问题。trick 给了梯度，
+却没给一个可微的 J。所以准确的说法是：
+**J 真实但不可微，L 可微但不真实，两者只在当前 θ 处共享同一个梯度。**
+
+**顺带一个没照抄公式的地方**：式 (8) 除的是 `N`（轨迹条数），
+而 `.mean()` 除的是 `batch_size`（时间步总数），两者差一个「平均轨迹长度」的常数因子，
+被 learning rate 吸收了。标准做法，但要知道自己偏离了公式：CartPole 里这个因子会随策略变好而变大
+（轨迹越来越长），相当于学习率在隐式衰减。
+
+> **这条讲的是「为什么要造一个假 loss」（决策）。**
+> 「怎么把式 (8) 一步步翻译成那行代码」（流程 + 形状检查清单）在 `FORMULA_TO_CODE.md`。
+
+**为什么 reward-to-go 方差更低 —— 那一项「期望为 0 但方差不为 0」到底什么意思**
+
+写完两个 estimator 时只知道结论「rtg 方差更小」，没搞懂为什么。补上推导。
+
+把 trajectory-centric 的权重在时刻 $t$ 处劈开成「过去」与「未来」两段：
+
+$$R(\tau)=\underbrace{\sum_{t'<t}\gamma^{t'}r_{t'}}_{P_t\ (\text{过去})}+\underbrace{\sum_{t'\ge t}\gamma^{t'}r_{t'}}_{F_t\ (\text{未来})}$$
+
+于是每个 $(i,t)$ 项拆成两半：
+
+$$\nabla_\theta\log\pi_\theta(a_t|s_t)\cdot R(\tau)=\underbrace{\nabla_\theta\log\pi_\theta(a_t|s_t)\cdot F_t}_{\text{reward-to-go 保留的}}+\underbrace{\nabla_\theta\log\pi_\theta(a_t|s_t)\cdot P_t}_{X_t}$$
+
+**X_t 的期望为零，靠的是 score function 恒等式**：
+
+$P_t$ 只由 $a_t$ **之前**发生的事决定，与 $a_t$ 无关。所以给定历史 $\tau_{<t}$ 时它是个常数，能提到期望外：
+
+$$\mathbb{E}\big[X_t\mid\tau_{<t}\big]=P_t\cdot\mathbb{E}_{a_t\sim\pi_\theta(\cdot\mid s_t)}\big[\nabla_\theta\log\pi_\theta(a_t\mid s_t)\big]$$
+
+而括号里那个恒等于零 —— 就是概率归一化求个导：
+
+$$\mathbb{E}_{a\sim\pi_\theta}[\nabla_\theta\log\pi_\theta(a\mid s)]
+=\sum_a \pi_\theta(a\mid s)\frac{\nabla_\theta\pi_\theta(a\mid s)}{\pi_\theta(a\mid s)}
+=\sum_a\nabla_\theta\pi_\theta(a\mid s)
+=\nabla_\theta\underbrace{\sum_a\pi_\theta(a\mid s)}_{=1}
+=\nabla_\theta 1=\mathbf{0}$$
+
+第三个等号是求和与求导交换。再套全期望公式：
+$\mathbb{E}[X_t]=\mathbb{E}\big[\mathbb{E}[X_t\mid\tau_{<t}]\big]=\mathbb{E}[P_t\cdot\mathbf{0}]=\mathbf{0}$。
+
+> 这个恒等式是策略梯度的支柱，不止用在这里 —— 阶段 2 的 baseline 能减而不引入偏差
+> （PDF 式 12 下面那行 $\nabla_\theta\mathbb{E}[b]=\mathbb{E}[\nabla_\theta\log\pi_\theta\cdot b]=0$）用的是**同一个**恒等式，
+> 只是把 $P_t$ 换成了常数 $b$。搞懂一次，两处都通。
+
+**方差不为零 —— 期望是 0 不等于这个量是 0**
+
+$$\operatorname{Var}(X_t)=\mathbb{E}[X_t^2]-\underbrace{(\mathbb{E}[X_t])^2}_{=\,0}=\mathbb{E}\big[\lVert\nabla_\theta\log\pi_\theta(a_t\mid s_t)\rVert^2\,P_t^2\big]>0$$
+
+只消掉了第二项，第一项照样是正的（只要 $P_t\neq 0$）。
+
+具象化：某状态策略 50/50，对某个标量参数 $\nabla_\theta\log\pi=+1$（动作 0）/ $-1$（动作 1），$P_t=10$：
+
+| 采到 | 概率 | $X_t$ |
+|---|---|---|
+| 动作 0 | 0.5 | $+10$ |
+| 动作 1 | 0.5 | $-10$ |
+
+均值 $0$，标准差 $10$。**永远采不到 $X_t=0$，但平均下来是 $0$。** 抛硬币赢 1 输 1 是一回事。
+所以它对梯度方向零贡献，只是让你需要更多样本才能把它平均掉。
+
+**在 CartPole 上这个噪声有多大**
+
+$\gamma=1$、每步 $r=1$、$H=200$ 时 $P_t=t$、$F_t=200-t$：
+
+| $t$ | 信号 $F_t$ | 噪声幅度 $\propto P_t$ | 噪信比 |
+|---|---|---|---|
+| 0 | 200 | 0 | — |
+| 100 | 100 | 100 | 1 : 1 |
+| 199 | 1 | 199 | **1 : 199** |
+
+**轨迹越长，末尾时刻噪声越压倒信号。而策略变好 ⇒ 轨迹变长 ⇒ 噪声变大。**
+这解释了实验里 trajectory-centric 的崩塌为什么总发生在训练**中后期**而不是开头
+（`cartpole_lb` 在 20–30 万步塌到 71.33，见 REPORT §1.1）。
+
+**结论**：删掉 $X_t$ 是纯赚 —— $\mathbb{E}[\hat g]$ 一分不变（无偏性保住），$\operatorname{Var}(\hat g)$ 直接砍掉一块，零代价。
+
+> 上面是形式推导。`VARIANCE.md` 里有一个 **4 条轨迹全部列举**的玩具例子，
+> 用 `Fraction` 精确算出两个估计量期望都是 $11/2$、方差 $90.75$ vs $30.75$ ——
+> 不用统计、不用采样，可以手算复核。那份还整理了本作业四种方差削减技巧
+> （rtg / baseline / normalization / GAE）哪些无偏、哪些用偏差换方差。
+这就是 PDF §2.2.2 说「we almost always use the second formulation」的原因。
+
 ### 验证记录
 
 用 AST 从文件里抽出这两个方法单独执行（不需要装 torch），四组用例全过：
@@ -183,6 +341,36 @@ G_t = Σ_{t'=t} γ^(t'-t) r_t'
 | flatten 后 q_values | `[4,3,2,1,2,1,3,2,1]` → 边界未串 ✅ |
 | 归一化 `[1,2,3,4]` | `mean=0, std=1` ✅ |
 | 归一化退化情形 `[7,7,7,7]`（std=0） | 得 `[0,0,0,0]`，未出现 NaN/inf ✅ |
+
+**验证「X_t 期望为 0、方差不为 0」（对应上面那条关键决定）**
+
+固定一个未训练的策略，在 CartPole 上采 500 个独立 batch（每 batch ~400 步），
+分别算三个梯度估计：`g_traj`（权重 R(τ)）、`g_rtg`（权重 F_t）、`g_past`（权重 P_t）。
+
+判据用**逐坐标 t 统计量** $t=\text{mean}/(\text{std}/\sqrt{N})$，256 个坐标。
+H0（该坐标均值为 0）成立时 |t| 应服从 ~N(0,1)，约 5% 的坐标 |t|>2。
+
+| | \|t\|>2 的比例 | max\|t\| | 结论 |
+|---|---|---|---|
+| 过去项 `g_past` | **0.0%** | **1.25** | 测不出任何非零 → 与「期望为 0」一致 ✅ |
+| 信号项 `g_rtg` | 100.0% | 48.72 | 压倒性显著非零（对照组） |
+
+同一批数据、同一个检验，一个 max|t| = 1.25，一个 48.72。
+
+单 batch 梯度的标准差（范数）：
+
+| | 标准差 |
+|---|---|
+| trajectory-centric | 0.2578 |
+| reward-to-go | 0.1102 → **traj 是 rtg 的 2.34 倍** |
+| 纯噪声项 X_t 单独 | 0.1784 → 是信号大小（‖E[g_rtg]‖=0.2268）的 **0.8 倍** |
+
+最后一行最说明问题：**X_t 单个 batch 的波动达到信号本身的 80%**，却对梯度方向毫无贡献。
+
+> **踩过的弯路**：一开始用「$\lVert\mathbb{E}[g_\text{past}]\rVert$ 是否随 $N$ 按 $1/\sqrt{N}$ 收缩」来判断，
+> 结果 `‖·‖×√N` 在 0.08~0.38 之间乱跳，看不出趋势，差点以为真有偏差。
+> **零均值向量的范数是卡方型的，恒为正、不随 N 趋于零** —— 用它判断有没有偏差是错的指标。
+> 换成逐坐标 t 检验立刻干净了。以后验证「某个量期望为零」一律用 t 检验，不要用范数。
 
 ### 踩的坑
 
@@ -214,9 +402,47 @@ G_t = Σ_{t'=t} γ^(t'-t) r_t'
   3. hw3 处理 batch 时大概率还会见到
      `setting an array element with a sequence`，症状→根因的诊断路径同样适用。
 
+#### 坑 2：把 Adam 的过冲误诊成实现 bug
+
+- **症状**：写完 `MLPPolicyPG.update` 后做方向性验证 —— 喂**单个**数据点，
+  给正 advantage，期望 `log π` 上升。四个环境里三个通过，InvertedPendulum 挂了：
+  ```
+  CartPole     adv=+1: Δlogπ=+0.512 OK    adv=-1: Δlogπ=-1.154 OK
+  LunarLander  adv=+1: Δlogπ=+0.736 OK    adv=-1: Δlogπ=-1.112 OK
+  InvPendulum  adv=+1: Δlogπ=-0.485 FAIL  adv=-1: Δlogπ=-0.933 OK
+  HalfCheetah  adv=+1: Δlogπ=+4.557 OK    adv=-1: Δlogπ=-8.104 OK
+  ```
+  「给了正的 advantage，这个动作的概率反而降了」看着像符号写反了。
+- **排查**：扫学习率，其余一切不变：
+  ```
+  lr=1e-1   Δlogπ = -9.464   ✗
+  lr=1e-2   Δlogπ = -0.485   ✗      ← 默认 5e-3 附近
+  lr=1e-3   Δlogπ = +0.018   ✓
+  lr=1e-4   Δlogπ = +0.002   ✓
+  ```
+  lr 一小就正常 ⇒ **不是符号问题，是步子迈过头了**。
+- **原因**：Adam 的第一步是 `m̂/(√v̂+ε) ≈ sign(g)`，**每个参数都走满 lr**。
+  InvertedPendulum 的 `mean_net` 有 4545 个参数同时各走 0.01，
+  合成到 μ 上的位移远超一阶近似的有效范围，直接越过目标点。
+  HalfCheetah 的 Δlogπ = +4.56 也印证了步子有多大 —— 只是它恰好没冲过头。
+- **教训**：
+  1. **单点 + 大 lr 的方向性测试不可靠**。真实训练里 batch 上千、advantage 有正有负，
+     不会出现这种单点极端情形。
+  2. 想验证「梯度方向对不对」，**别用「跑一步优化器看结果」**，
+     直接查解析梯度：`d(loss)/d(log_prob_j)` 应当等于 `-adv_j / batch`。
+     这个检验与优化器完全无关，一次就过（见验证记录）。
+  3. 遇到「方向反了」先扫 lr 再怀疑符号 —— 两分钟的事，能省掉一轮通读代码。
+
 ### 遗留疑问
 
-> TODO：当时没搞懂、先绕过去的点
+- [ ] **`.mean()` 除的是 `batch_size` 而不是式 (8) 的 `N`（轨迹条数）**，差一个「平均轨迹长度」
+      的因子，被 learning rate 吸收了。标准做法，但 CartPole 里这个因子会随策略变好而变大
+      （轨迹从 19.5 步长到 167 步），相当于**学习率在隐式衰减**。
+      这是好事还是坏事？跟 `-na` 的作用有没有重叠？没想清楚。
+- [ ] **梯度方差在训练中涨了约 6000 倍**（`VARIANCE.md` 实测：0.055 → 339.9），
+      而学习率始终不变。这解释了崩塌为什么发生在中后期。
+      那么除了 `-na`，直接给学习率加个衰减是不是也能缓解？没试。
+- [x] ~~为什么 rtg 方差更低~~ —— 已补齐，见上面「关键决定」与 `VARIANCE.md`。
 
 ---
 

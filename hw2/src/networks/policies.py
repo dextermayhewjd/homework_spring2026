@@ -34,7 +34,11 @@
 
 5. Normal.log_prob(a) 返回逐维度的结果 (batch, ac_dim),
    Categorical.log_prob(a) 返回 (batch,)。
-   连续情况在 update 里要对最后一维求和,否则 HalfCheetah 会静默训练失败。
+   连续情况在 update 里必须对最后一维求和 —— 各维独立,联合概率是乘积,log 之后是求和。
+   漏掉的后果取决于 ac_dim,实测:
+       HalfCheetah  ac_dim=6  (batch,6) * (batch,) 右对齐 6 vs batch 不匹配 -> RuntimeError,会崩
+       InvertedPendulum ac_dim=1  (batch,1) 里的 1 可以广播 -> 静默展开成 (batch,batch),不报错
+   所以真正危险的是 ac_dim=1 的环境(实验 4),不是 HalfCheetah。详见 SHAPES.md。
 
 为什么这里要显式构造分布,而平时写网络模块不用
 --------------------------------------------
@@ -121,7 +125,7 @@ class MLPPolicy(nn.Module):
 
         return ptu.to_numpy(action)        # torch tensor -> np.ndarray
 
-    def forward(self, obs: torch.FloatTensor):
+    def forward(self, obs: torch.FloatTensor) -> distributions.Distribution:
         """
         This function defines the forward pass of the network.  You can return anything you want, but you should be
         able to differentiate through it. For example, you can return a torch.FloatTensor. You can also return more
@@ -162,10 +166,18 @@ class MLPPolicyPG(MLPPolicy):
         advantages = ptu.from_numpy(advantages)
 
         # TODO: compute the policy gradient actor loss
-        loss = None
+        action_distribution: distributions.Distribution = self(obs)
+        log_probs = action_distribution.log_prob(actions)
+        if not self.discrete:
+            log_probs = log_probs.sum(dim=-1)
+
+        loss = -(log_probs * advantages).mean()
+
 
         # TODO: perform an optimizer step
-        pass
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
         return {
             "Actor Loss": loss.item(),
