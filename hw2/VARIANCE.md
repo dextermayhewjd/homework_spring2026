@@ -16,9 +16,88 @@
 
 ## 核心命题
 
-$$\hat g_{\text{traj}}=\hat g_{\text{rtg}}+X_t,\qquad \mathbb{E}[X_t]=0,\qquad \operatorname{Var}(X_t)>0$$
+先把三个量定义清楚。对**一条**轨迹 $\tau$ 的时刻 $t$：
 
-所以删掉 $X_t$：
+| 记号 | 定义 | 含义 |
+|---|---|---|
+| $P_t$ | $\sum_{t'<t}\gamma^{t'}r_{t'}$ | $t$ **之前**已经到手的奖励（$P_0=0$） |
+| $F_t$ | $\sum_{t'\ge t}\gamma^{t'}r_{t'}$ | $t$ **及之后**的奖励，即 reward-to-go |
+| $R(\tau)$ | $P_t+F_t$ | 整条轨迹的回报，对每个 $t$ 都是同一个数 |
+
+$$\boxed{X_t:=\nabla_\theta\log\pi_\theta(a_t\mid s_t)\cdot P_t}$$
+
+$X_t$ 是**单个时间步**上被多算的那一项，是个随机向量（与 $\theta$ 同维），
+随机性来自「采样到哪条轨迹」。两个估计量的关系：
+
+$$\hat g_{\text{traj}}=\sum_t\nabla_\theta\log\pi_\theta(a_t|s_t)\,R(\tau)
+=\underbrace{\sum_t\nabla_\theta\log\pi_\theta(a_t|s_t)F_t}_{\hat g_{\text{rtg}}}+\sum_t X_t$$
+
+$$\boxed{\hat g_{\text{traj}}=\hat g_{\text{rtg}}+\sum_t X_t,\qquad \mathbb{E}[X_t]=0\ \ \forall t,\qquad \operatorname{Var}\Big(\sum_t X_t\Big)>0}$$
+
+**注意是对 $t$ 求和**，不是单独一项。期望是线性的，所以
+$\mathbb{E}[\sum_t X_t]=\sum_t\mathbb{E}[X_t]=0$；方差不是线性的，加不掉。
+（不同 $t$ 的 $X_t$ 来自同一条轨迹，并不独立，所以方差也**不能**简单相加。）
+
+<details>
+<summary><b>不放心的话，把 $T=3$ 完全展开验一遍（点开）</b></summary>
+
+记 $s_t:=\nabla_\theta\log\pi_\theta(a_t|s_t)$，$\gamma=1$，$R=r_0+r_1+r_2$。
+
+**左边**（每一项都乘同一个 $R$）：$\hat g_{\text{traj}}=s_0R+s_1R+s_2R$
+
+**右边**，先列出两半：
+
+| $t$ | $F_t$（未来） | $P_t$（过去） |
+|---|---|---|
+| 0 | $r_0+r_1+r_2$ | $0$ |
+| 1 | $r_1+r_2$ | $r_0$ |
+| 2 | $r_2$ | $r_0+r_1$ |
+
+$$\hat g_{\text{rtg}}=s_0(r_0{+}r_1{+}r_2)+s_1(r_1{+}r_2)+s_2(r_2)$$
+$$\textstyle\sum_t X_t=s_0\cdot 0+s_1\cdot r_0+s_2\cdot(r_0{+}r_1)$$
+
+**逐行相加，每一行都拼回完整的 $R$**：
+
+$$\begin{aligned}
+s_0:&\quad (r_0{+}r_1{+}r_2)+0 &&= R\\
+s_1:&\quad (r_1{+}r_2)+r_0 &&= R\\
+s_2:&\quad (r_2)+(r_0{+}r_1) &&= R
+\end{aligned}$$
+
+所以右边 $=s_0R+s_1R+s_2R=$ 左边。**这是恒等变形，没有任何近似。**
+
+真实轨迹上也验过：CartPole $T=30$，直接算 $\hat g_{\text{traj}}$ 与算 $\hat g_{\text{rtg}}+\sum_t X_t$，
+全部 4610 个梯度分量逐元素比对，最大差 $6.2\times 10^{-6}$（浮点误差量级），`torch.allclose` 通过。
+
+**最容易卡住的点**：$R(\tau)$ 是一个固定的数，$P_t$ 和 $F_t$ 却随 $t$ 变 ——
+怎么可能对每个 $t$ 都有 $P_t+F_t=R(\tau)$？因为两者**此消彼长**：
+$t$ 往后走一步，$P_t$ 多吃一个奖励、$F_t$ 就少一个，和不变。
+
+</details>
+
+> **$X_0$ 恒为 0**：第 0 步之前没有任何奖励，$P_0=0$。
+> 所以下面 $H=2$ 的玩具例子里求和塌成单独一项 $X_1$ —— 表格里没有 $X_0$ 列不是省略了。
+
+### 真实轨迹上 $X_t$ 长什么样
+
+一条 CartPole 轨迹（$T=35$，$\gamma=1$，每步 $r=1$，所以 $P_t=t$、$F_t=35-t$）：
+
+| $t$ | $P_t$ | $F_t$ | $\lVert X_t\rVert$ | 噪信比 $P_t/F_t$ |
+|---|---|---|---|---|
+| 0 | 0 | 35 | **0.0000** | 0.00 |
+| 1 | 1 | 34 | 0.0736 | 0.03 |
+| 3 | 3 | 32 | 0.2392 | 0.09 |
+| 33 | 33 | 2 | 6.2491 | 16.50 |
+| 34 | 34 | 1 | **6.2634** | **34.00** |
+
+开头这一项几乎不存在，到末尾变成信号的 34 倍。**轨迹越长，末段被污染得越厉害。**
+
+> **措辞小心**：整条轨迹上 $\sum_t\lVert X_t\rVert=59.47$、$\sum_t\lVert\nabla\log\pi\cdot F_t\rVert=39.16$，
+> 但这是**每项范数之和**，不是**向量和的范数**。$X_t$ 求和时会大量互相抵消（期望为零），
+> 所以不能说「最终梯度里 60% 是噪声」。
+> 正确的理解是：**每一项的大小才是方差的来源** —— 抵消得再好，单次采样的抖动也由项的大小决定。
+
+所以删掉 $\sum_t X_t$：
 
 - **期望一分不变** —— 你估计的还是同一个东西，无偏性保住
 - **方差变小** —— 估计更准
@@ -38,7 +117,82 @@ $$\hat g_{\text{traj}}=\hat g_{\text{rtg}}+X_t,\qquad \mathbb{E}[X_t]=0,\qquad \
 | 第 0 步奖励 $r_0$ | **10** | 0 |
 | 第 1 步奖励 $r_1$ | **1** | 0 |
 
-**策略**：每步 50/50。记 score $s(a)=\nabla_\theta\log\pi_\theta(a)$，取 $s(0)=+1$、$s(1)=-1$。
+**策略**：每步 50/50。记 score $s(a)=\nabla_\theta\log\pi_\theta(a)$，下面取 $s(0)=+1$、$s(1)=-1$。
+
+<details>
+<summary><b>这两个数从哪来的？（点开）</b></summary>
+
+代码里离散策略走的是 `Categorical(logits=z)`，即 softmax：
+
+$$\pi(a)=\frac{e^{z_a}}{\sum_j e^{z_j}}$$
+
+**第一步：先取 log，把除法变减法。** 这是全部的关键 —— 原式是分式，直接求导要用商法则；
+取 log 后变成「一个简单项减一个 log-sum-exp」，两项可以分开处理：
+
+$$\log\pi(a)=\log e^{z_a}-\log\sum_j e^{z_j}=z_a-\log\sum_j e^{z_j}$$
+
+**第二步：对 $z_k$ 求导，两项分别算。**
+
+第一项 —— $z_a$ 是向量的第 $a$ 个分量，对第 $k$ 个分量求导：
+
+$$\frac{\partial z_a}{\partial z_k}=\begin{cases}1 & k=a\\ 0 & k\ne a\end{cases}=\mathbb{1}[k=a]$$
+
+第二项 —— 记 $S=\sum_j e^{z_j}$，链式法则。注意 $S$ 里**只有 $j=k$ 那一项含 $z_k$**：
+
+$$\frac{\partial S}{\partial z_k}=\frac{\partial}{\partial z_k}\Big(e^{z_0}+\cdots+e^{z_k}+\cdots\Big)=e^{z_k}$$
+
+$$\Longrightarrow\quad\frac{\partial\log S}{\partial z_k}=\frac{1}{S}\cdot e^{z_k}=\frac{e^{z_k}}{\sum_j e^{z_j}}=\pi(k)$$
+
+> **log-sum-exp 的导数恰好就是 softmax。** 值得单独记住，写 attention、
+> 算 log-partition 的梯度时还会遇到。
+
+**第三步：合并。**
+
+$$\boxed{\frac{\partial\log\pi(a)}{\partial z_k}=\mathbb{1}[k=a]-\pi(k)}$$
+
+**这个式子的含义**：$\underbrace{\mathbb{1}[k=a]}_{\text{实际选了 }k\text{ 吗}}-\underbrace{\pi(k)}_{\text{本来预期选 }k\text{ 的概率}}$
+= **实际 − 预期 = 惊讶程度**。
+
+- **真选了 $k$**：抬高 $z_k$ 让它更可能，梯度 $=1-\pi(k)>0$。本来就几乎必选时梯度趋于 0（抬也没用）
+- **没选 $k$**：抬高 $z_k$ 会**压低**你实际选的那个动作，梯度 $=-\pi(k)<0$
+
+第二条是 **softmax 的零和性质**（分母共享，抬一个必压其余），也正是「等大反号」的来源。
+
+**闭环验证**：用这个公式能直接推出 score function 恒等式，和「概率归一化求导」那条路殊途同归：
+
+$$\sum_a\pi(a)\big(\mathbb{1}[k{=}a]-\pi(k)\big)=\underbrace{\sum_a\pi(a)\mathbb{1}[k{=}a]}_{=\ \pi(k)}-\pi(k)\underbrace{\sum_a\pi(a)}_{=\ 1}=\pi(k)-\pi(k)=0$$
+
+**和交叉熵的关系**：监督学习里 $\dfrac{\partial(-\log\pi(y))}{\partial z_k}=\pi(k)-\mathbb{1}[k{=}y]$，
+即经典的「**softmax 减 one-hot**」—— 和上式只差一个负号（交叉熵是负对数似然）。
+所以 **PG 的 actor loss 和监督学习的交叉熵梯度公式是同一个**，
+区别只在前面乘的系数：监督学习恒为 1，策略梯度是 advantage。
+（`policies.py` 模块 docstring 里「PG 就是加权的交叉熵」，根子在这。）
+
+**代回本例**：在 50/50（$\pi=(0.5,0.5)$）处对 $z_0$ 求导，torch 实测 `d logπ/d z = [0.5, -0.5]`：
+
+$$s(0)=1-0.5=+0.5,\qquad s(1)=0-0.5=-0.5$$
+
+**真实值是 $\pm 0.5$**，表格里取 $\pm 1$ 是整体放大 2 倍，纯粹为了算术干净。
+score 线性进入估计量，放大 $c$ 倍会让期望乘 $c$、方差乘 $c^2$ —— **方差之比不变**：
+
+| $c$ | $\mathbb{E}[\hat g_{\text{traj}}]$ | $\mathbb{E}[\hat g_{\text{rtg}}]$ | $\operatorname{Var}$[traj] | $\operatorname{Var}$[rtg] | 方差比 |
+|---|---|---|---|---|---|
+| 1/2（真实值） | 2.750 | 2.750 | 22.69 | 7.69 | **2.9512** |
+| 1（本文用） | 5.500 | 5.500 | 90.75 | 30.75 | **2.9512** |
+| 10 | 55.0 | 55.0 | 9075 | 3075 | **2.9512** |
+
+**为什么必然是「等大反号」** —— 这不是我为了让例子好看而设的，
+恰恰是本文要演示的那个恒等式**逼出来**的：
+
+$$\mathbb{E}_{a\sim\pi}[s(a)]=0.5\,s(0)+0.5\,s(1)=0\;\Longrightarrow\;s(1)=-s(0)$$
+
+所以后面「$X_1$ 的 $+10$ 与 $-10$ 恰好抵消」不是巧合，是概率归一化的必然结果。
+
+> **只有 50/50 时才等大。** 一般地 $\pi(0)=p$ 时 $s(0)=1-p$、$s(1)=-p$
+> （torch 实测 $p=0.731$ 时为 $+0.269$ / $-0.731$），大小不同，
+> 靠**加权**抵消：$p(1-p)+(1-p)(-p)=0$。等大只是 $p=0.5$ 的特例。
+
+</details>
 
 **两个估计量**（单条轨迹）：
 
