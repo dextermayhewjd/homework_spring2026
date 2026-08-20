@@ -137,11 +137,59 @@ $$\log\pi(a)=\log e^{z_a}-\log\sum_j e^{z_j}=z_a-\log\sum_j e^{z_j}$$
 
 $$\frac{\partial z_a}{\partial z_k}=\begin{cases}1 & k=a\\ 0 & k\ne a\end{cases}=\mathbb{1}[k=a]$$
 
-第二项 —— 记 $S=\sum_j e^{z_j}$，链式法则。注意 $S$ 里**只有 $j=k$ 那一项含 $z_k$**：
+第二项 —— 记 $S=\sum_j e^{z_j}$。这一步拆细了写（以 3 个动作为例，$z=(z_0,z_1,z_2)$）。
 
-$$\frac{\partial S}{\partial z_k}=\frac{\partial}{\partial z_k}\Big(e^{z_0}+\cdots+e^{z_k}+\cdots\Big)=e^{z_k}$$
+**前提**：$z_0,z_1,z_2$ 是网络输出向量的三个**互不相干的数**，所以
 
-$$\Longrightarrow\quad\frac{\partial\log S}{\partial z_k}=\frac{1}{S}\cdot e^{z_k}=\frac{e^{z_k}}{\sum_j e^{z_j}}=\pi(k)$$
+$$\frac{\partial z_j}{\partial z_k}=\begin{cases}1 & j=k\quad\text{（对自己求导）}\\[2pt] 0 & j\ne k\quad\text{（对别人求导，别人是常数）}\end{cases}$$
+
+后面每一步都建立在这条上。
+
+**(1) $S$ 是什么** —— 就是三项相加：
+
+$$S=\sum_j e^{z_j}=e^{z_0}+e^{z_1}+e^{z_2}$$
+
+**(2) 对 $z_k$ 求导，逐项处理。** 求导是线性的，和的导数 = 导数的和：
+
+$$\frac{\partial S}{\partial z_k}=\frac{\partial e^{z_0}}{\partial z_k}+\frac{\partial e^{z_1}}{\partial z_k}+\frac{\partial e^{z_2}}{\partial z_k}$$
+
+单看一项，链式法则（外层 $e^u$、内层 $u=z_j$）：
+
+$$\frac{\partial e^{z_j}}{\partial z_k}=e^{z_j}\cdot\underbrace{\frac{\partial z_j}{\partial z_k}}_{\text{前提那条}}=\begin{cases}e^{z_j} & j=k\\[2pt] 0 & j\ne k\end{cases}$$
+
+具体代 $k=1$ 看：
+
+$$\frac{\partial S}{\partial z_1}=\underbrace{e^{z_0}\cdot 0}_{e^{z_0}\text{ 里没有 }z_1}+\underbrace{e^{z_1}\cdot 1}_{\text{只有这项含 }z_1}+\underbrace{e^{z_2}\cdot 0}_{e^{z_2}\text{ 里没有 }z_1}=e^{z_1}$$
+
+**三项里只活下来下标匹配的那一项**，所以一般地 $\dfrac{\partial S}{\partial z_k}=e^{z_k}$。
+
+**(3) log 的链式法则**：$\dfrac{d}{dx}\log u=\dfrac{1}{u}\cdot\dfrac{du}{dx}$，此处 $u=S$、$x=z_k$：
+
+$$\frac{\partial\log S}{\partial z_k}=\frac{1}{S}\cdot\frac{\partial S}{\partial z_k}$$
+
+**(4) 代入 (2) 的结果**：
+
+$$\frac{\partial\log S}{\partial z_k}=\frac{1}{S}\cdot e^{z_k}=\frac{e^{z_k}}{S}$$
+
+**(5) 认出这是什么。** 把 $S$ 展开回去：
+
+$$\frac{e^{z_k}}{S}=\frac{e^{z_k}}{\sum_j e^{z_j}}\;\overset{\text{softmax 的定义}}{=}\;\pi(k)$$
+
+不是「凑巧等于」，是**同一个表达式**。
+
+$$\boxed{\frac{\partial\log S}{\partial z_k}=\pi(k)}$$
+
+**代数字验一遍**（$z=(1,0,2)$，对 $z_1$ 求导）：
+
+| 步骤 | 计算 | 结果 |
+|---|---|---|
+| (1) | $S=e^1+e^0+e^2=2.71828+1+7.38906$ | $11.10734$ |
+| (2) | $\partial S/\partial z_1=e^1\!\cdot\!0+e^0\!\cdot\!1+e^2\!\cdot\!0$ | $1.00000$ |
+| (3)(4) | $(1/11.10734)\times 1.00000$ | $0.090031$ |
+| (5) | $\pi(1)=e^{z_1}/S=1/11.10734$ | $0.090031$ ✓ |
+
+autograd 也对得上：`d(logsumexp)/dz = [0.244728, 0.090031, 0.665241]`
+与 `softmax(z) = [0.244728, 0.090031, 0.665241]` 逐元素相等。
 
 > **log-sum-exp 的导数恰好就是 softmax。** 值得单独记住，写 attention、
 > 算 log-partition 的梯度时还会遇到。
