@@ -181,7 +181,9 @@ class PGAgent(nn.Module):
             # (注意不是「Q 值就是 baseline」——baseline 是被减掉的那一项 V(s),这里它不存在)
             advantages = q_values
         else:
-            # TODO: run the critic and use it as a baseline
+            # TODO: run the critic and use it as a baseline 
+            # 当前已完成 这里转换的原因是gym用的是numpy
+            # COMPLETED 以及这里相互的转换能够移移除这里的torch加入计算链带来的可能的麻烦
             values = ptu.to_numpy(self.critic(ptu.from_numpy(obs)))
             assert values.shape == q_values.shape, (values.shape,q_values.shape)
             
@@ -200,7 +202,10 @@ class PGAgent(nn.Module):
                     # TODO: recursively compute advantage estimates starting from timestep T.
                     # HINT: use terminals to handle edge cases. terminals[i] is 1 if the state is the last in its
                     # trajectory, and 0 otherwise.
-                    pass
+                    mask = 1.0 - terminals[i]
+                    delta = rewards[i] + self.gamma * values[i+1] * mask - values[i]
+                    advantages[i] = delta + self.gamma * self.gae_lambda * advantages[i+1] * mask
+                    
 
                 # remove dummy advantage
                 advantages = advantages[:-1]
