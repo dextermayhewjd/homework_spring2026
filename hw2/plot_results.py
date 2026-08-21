@@ -12,7 +12,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # dataviz 参考调色板（light 模式 categorical slot 1-4，已过验证器）
-SERIES  = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+# dataviz 参考调色板 light 模式 categorical slot 1-5，五色一起过验证器：
+#   CVD 最差相邻对 ΔE 9.1、常规视觉最差 19.6，均达标。
+#   aqua/yellow/magenta 对比度 < 3:1，靠 legend + REPORT 数据表兜底（relief 规则）。
+SERIES  = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
 SURFACE = "#fcfcfb"; INK = "#0b0b0b"; INK2 = "#52514e"; GRID = "#e4e3df"
 
 for cand in ("Noto Sans CJK JP", "Noto Sans CJK SC", "WenQuanYi Zen Hei", "DejaVu Sans"):
@@ -40,7 +43,17 @@ def find(exp_name):
     return hits[0]
 
 
-def plot(names, labels, title, subtitle, outfile, ycol="Eval_AverageReturn", ylabel=None, logy=False):
+def smooth(y, w):
+    """滑动平均。窗口内不足 w 个点时用已有的点平均（前段不丢数据）。"""
+    out = []
+    for i in range(len(y)):
+        lo = max(0, i - w + 1)
+        out.append(sum(y[lo:i+1]) / (i - lo + 1))
+    return out
+
+
+def plot(names, labels, title, subtitle, outfile, ycol="Eval_AverageReturn",
+         ylabel=None, logy=False, smooth_w=0):
     fig, ax = plt.subplots(figsize=(7.2, 4.4), dpi=200)
     fig.patch.set_facecolor(SURFACE); ax.set_facecolor(SURFACE)
 
@@ -51,6 +64,10 @@ def plot(names, labels, title, subtitle, outfile, ycol="Eval_AverageReturn", yla
             print(f"     跳过 {name}：log.csv 里没有 '{ycol}' 列")
             continue
         x, y = got
+        if smooth_w:
+            # 原始曲线淡显（不丢信息），平滑曲线实显（读趋势）。RL 学习曲线的标准画法。
+            ax.plot(x, y, color=SERIES[i], lw=1, alpha=0.22, zorder=2)
+            y = smooth(y, smooth_w)
         ax.plot(x, y, color=SERIES[i], lw=2, solid_joinstyle="round",
                 solid_capstyle="round", label=labels[i], zorder=3)
         ax.plot(x[-1], y[-1], "o", ms=8, color=SERIES[i], mec=SURFACE, mew=2, zorder=4)
@@ -120,5 +137,13 @@ if __name__ == "__main__":
             "两者 critic 超参相同；optional run 另开启了视频采样",
             "exp2_na_comparison.png",
         )
+    elif which == "exp3":
+        # PDF §5 明确要求 "a single plot" —— 五条 λ 曲线画在同一张
+        LAMS = ["0", "0.95", "0.98", "0.99", "1"]
+        plot([f"lunar_lander_lambda{l}" for l in LAMS],
+             [f"λ={l}" for l in LAMS],
+             "LunarLander-v2 GAE λ 扫描",
+             "λ=0 退化成单步 TD（式 16），λ=1 退化成纯 Monte Carlo；粗线为 10 点滑动平均，淡线为原始值",
+             "exp3_lambda_sweep.png", smooth_w=10)
     else:
         raise SystemExit(f"未知实验：{which}")

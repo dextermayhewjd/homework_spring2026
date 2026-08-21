@@ -22,7 +22,7 @@
 | 0. 数据流打通 | —（前置） | `run.py` `utils.py` `policies.py` | `b14695f` | ✅ |
 | 1. Vanilla PG | §3 | `pg_agent.py` `policies.py` | `839e29c` `b049f09` `f762a8b` | ✅ 8/8 |
 | 2. Baseline   | §4 | `critics.py` `pg_agent.py` | `3ca746e` `9cb3a21` `8422614` | ✅ 5/5 |
-| 3. GAE        | §5 | `pg_agent.py` | | ☐ |
+| 3. GAE        | §5 | `pg_agent.py` | 本次 | ✅ 1/1 |
 | 4. 调参       | §6 | 无代码改动 | — | ☐ |
 
 > 三个阶段动的代码不重叠，**一个阶段一个 commit**。这样 `git log -p` 本身就是一份
@@ -602,7 +602,7 @@ TypeError: linear(): argument 'input' (position 1) must be Tensor, not numpy.nda
 
 ### TODO 清单
 
-- [ ] `pg_agent.py` `_estimate_advantage`：GAE 倒序递推
+- [x] `pg_agent.py` `_estimate_advantage`：GAE 倒序递推 ✅ 四组钉桩全过
 
 ### 关键决定
 
@@ -742,9 +742,44 @@ PDF 式 (16) 下面给的边界情形 $\delta_{H-1}=r_{H-1}-V_\phi(s_{H-1})$ 就
 两种写法：乘掩码 `* (1 - terminals[i])`，或显式 `if`。
 **掩码更简洁，且是生产代码的普遍写法**（verl / torchrl 的 GAE 都是掩码版）。
 
+### 验证记录
+
+四组钉桩，全部通过（$\gamma=0.9$，用 Stub 替换 critic 以便手算对答案）：
+
+| 用例 | 期望 | 结果 |
+|---|---|---|
+| 单轨迹 $r{=}[1,2,0,3]$, $V{=}[5,4,6,2]$, $\lambda{=}0.95$ | `[0.0617, 0.54, -3.345, 1.0]` | ✅ |
+| **双轨迹** `terminals=[0,0,1,0,1]` | `[0.3139, 0.835, -3.0, 6.59, -2.0]` | ✅ |
+| $\lambda=0$ | 逐元素等于单步 TD 残差 $\delta$ | ✅ |
+| $\lambda=1$ | 逐元素等于纯 MC 的 $Q-V$ | ✅ |
+
+**第二组是唯一能验出边界 bug 的** —— 单轨迹用例里 `terminals` 只有末位是 1，
+掩码写不写都得到同样结果。这是阶段 1「坑 1」那条教训的复用：
+**验证用例必须能区分正确实现和错误实现。**
+
+后两组同时验证了代码和对 PDF §5 Q2 的理解，直接引进了 `REPORT.md` §3.3 Q2 当证据。
+
 ### 踩的坑
 
-> TODO
+#### 坑：递推里把「写进格子」写成了「换掉整个数组」
+
+- **症状**：`IndexError: invalid index to scalar variable`，两组用例都崩。
+- **原因**：漏了一个下标。
+  ```python
+  advantages    = delta + γλ * advantages[i+1] * mask   # ✗ 覆盖整个数组
+  advantages[i] = delta + γλ * advantages[i+1] * mask   # ✓ 写进第 i 格
+  ```
+  第 1 轮 `advantages` 从 `(B+1,)` 的数组变成一个 float；
+  第 2 轮 `advantages[i+1]` 去索引标量 → 崩。
+- **根因**：**递推的本质是「同一个数组既读又写」** ——
+  `advantages[i] = …` 写当前格，`advantages[i+1]` 读上一轮写的格。
+  写成 `advantages = …` 就把「填格子」变成了「换数组」，递推链当场断掉。
+- **为什么阶段 1 没遇到**：`_discounted_reward_to_go` 用的是 `running` 这个**单独的标量**
+  做累积器，不需要原地改数组。这里因为下游要全部 $A_i$，必须写数组 —— 是新的一类错误。
+- **教训**：
+  1. 好消息是**它会崩**，不是静默。
+  2. 但 **`batch_size == 1` 时循环只跑一轮，永远撞不上** ——
+     又一个「验证用例长度必须 > 1」的例子。
 
 ### 遗留疑问
 
@@ -756,6 +791,14 @@ PDF 式 (16) 下面给的边界情形 $\delta_{H-1}=r_{H-1}-V_\phi(s_{H-1})$ 就
       实践中无所谓：$(\gamma\lambda)^{H-t}$ 在轨迹够长时已极小，且末尾用 $V(s_H)=0$ 收尾。
       **所有主流实现（verl / torchrl / SB3）都用 (21)/(22)，没人管那个归一化常数。**
 
+- [ ] **五个 λ 的 `Baseline Loss` 差 47 倍**（λ=0 是 3936、λ=0.95 是 83），但 critic 的
+      回归目标 `q_values` **与 λ 无关**。我在 REPORT §3.1 的解释是「λ 改变策略 →
+      策略改变轨迹 → 回报分布不同 → MSE 不在一个量纲上」。**合理但没验证** ——
+      要验的话得比较五个 run 的 `q_values` 分布（均值、方差），没做。
+
+- [ ] **λ=0.98 和 λ=1 都「冲上去又掉下来」，λ=0.99 却稳住了。** 单 seed，
+      这个区别有多少是真信号、有多少是运气？PDF 自己也说 "Results may have some variance"。
+      跑多 seed 才说得清，作业只要求一次。
 ---
 
 ## 阶段 4 — 调参（PDF §6）
