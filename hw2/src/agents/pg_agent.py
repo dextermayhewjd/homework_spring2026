@@ -90,7 +90,15 @@ class PGAgent(nn.Module):
         # step 4: if needed, use all datapoints (s_t, a_t, q_t) to update the PG critic/baseline
         if self.critic is not None:
             # TODO: perform `self.baseline_gradient_steps` updates to the critic/baseline network
-            critic_info = None
+            # 为什么 critic 走 N 步而 actor 只走 1 步：actor 的 ∇L = -∇J 只在当前 θ、
+            # 当前这批数据下成立（数据是旧策略采的，θ 一动等式就失效）；critic 的 loss
+            # 是真回归损失，(obs, q_values) 就是个固定数据集，反复用完全合法，
+            # 而且一步远不足以拟合 —— 拟合不上的话 baseline 减了等于没减。
+            for _ in range(self.baseline_gradient_steps):
+                # 循环里直接赋值，最终留下的是【最后一次】的 loss，即「拟合完这批数据后
+                # 还剩多少误差」。REPORT §2.2 的 baseline loss 曲线画的就是它，
+                # §2.3 调小 -bgs 时这个数会明显变高。
+                critic_info = self.critic.update(obs=obs, q_values=q_values)
 
             info.update(critic_info)
 
@@ -174,12 +182,12 @@ class PGAgent(nn.Module):
             advantages = q_values
         else:
             # TODO: run the critic and use it as a baseline
-            values = None
-            assert values.shape == q_values.shape
-
+            values = ptu.to_numpy(self.critic(ptu.from_numpy(obs)))
+            assert values.shape == q_values.shape, (values.shape,q_values.shape)
+            
             if self.gae_lambda is None:
                 # TODO: if using a baseline, but not GAE, what are the advantages?
-                advantages = None
+                advantages = q_values - values
             else:
                 # TODO: implement GAE
                 batch_size = obs.shape[0]
