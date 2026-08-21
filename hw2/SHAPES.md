@@ -1,7 +1,8 @@
 # 张量形状与轴：怎么想才不会错
 
 > **这份记什么**：形状推理的心法 —— 哪根轴装什么、`dim=` 到底在说什么、
-> 分布对象的 `batch_shape` / `event_shape`、以及哪些形状错误**不会报错**。
+> 分布对象的 `batch_shape` / `event_shape`、哪些形状错误**不会报错**，
+> 以及六个主流库实测下来怎么防（T0/T1/T1.5/T2）与**本仓库采用的约定**。
 >
 > **不记什么**：
 > - 「公式怎么翻译成代码」→ `FORMULA_TO_CODE.md`
@@ -199,6 +200,167 @@ assert log_probs.shape == advantages.shape, (log_probs.shape, advantages.shape)
 好的验证形状：**各维长度互不相等、都大于 1**。比如 `batch=7, ac_dim=3`。
 
 ---
+
+## 怎么系统性地防：工业界实测
+
+前面讲的是**广播规则**和**失败模式**。这一节讲**怎么让形状从「隐含假设」变成「写出来的东西」**。
+
+先说一个坏消息：**没有更安全的 API**。三种常见去轴写法，形状不符时全部静默通过：
+
+```
+(3,5).squeeze(-1)   ->  (3,5)    什么都没做，不报错
+(3,5)[:, 0]         ->  (3,)     取了第 0 列，不报错
+(3,5).reshape(-1)   ->  (15,)    拍平了，不报错
+```
+
+额外两个坑：`squeeze(dim)` 在该维不是 1 时**静默无操作**；`squeeze()` 不带参数在 batch=1 时把 batch 维也吃掉（`(1,1) -> ()`）。
+
+所以问题不是「选哪个函数」，而是「用什么机制把形状显式化」。四种机制：
+
+| 档 | 机制 | 形状信息存在哪 |
+|---|---|---|
+| **T0** | docstring / 行内注释写形状 | 注释里 |
+| **T1** | `assert` / `raise` 检查形状 | 运行时 |
+| **T1.5** | 变量名后缀（Noam 记法） | 代码本身，**每一处使用** |
+| **T2** | 类型注解（jaxtyping + beartype） | 类型系统，**只在函数边界** |
+
+### 六个主流库的实测（2026-08 读的源码）
+
+| 库 | 归属 | T0 | T1 | T1.5 | T2 |
+|---|---|---|---|---|---|
+| **verl** | 字节，当前 RLHF 事实主流 | ✅ 大量 | ❌ | ❌ | ❌ |
+| **torchrl** | PyTorch 官方 | ✅ | ✅ `raise RuntimeError` | ❌ | ❌ |
+| **TRL** | HuggingFace | ✅ 行内 `(B, L-1, H)` | ❌ | 少量 | ❌ |
+| **RLinf** | 清华系 RL 基础设施 | ✅ `algorithms/` | ✅ `assert` | ❌ | 装了 einops 但算法里没用 |
+| **torchtitan** | Meta 官方大规模训练 | ❌ | ❌ | ❌ | ❌ |
+| **nanodo** | Google DeepMind | ❌ | ❌ | ✅ **全面 Noam 记法** | ❌ |
+
+**六个库，零个用 T2。**
+
+具体证据：
+
+```python
+# verl —— 纯 T0
+"""shape is (bs, response_length)"""
+"""shape: (bs, response_length, vocab_size)"""
+
+# torchrl —— T0 + 真 T1（raise 不是 assert）
+"""All tensors must have shape [*Batch x TimeSteps x *F]"""
+if not (next_state_value.shape == state_value.shape == reward.shape
+        == done.shape == terminated.shape):
+    raise RuntimeError(SHAPE_ERR)
+
+# nanodo —— 教科书级 T1.5
+y_BxLxD = self.embed(y_BxL)
+q_BxLxHxDh, k_BxLxHxDh, v_BxLxHxDh = ...
+att_BxHxLxL = jnp.einsum(...)
+logits_BxLxV = self.embed.attend(...)
+
+class DoConfig:
+  D: int  # model/embed dim
+  H: int  # num attention heads
+  L: int  # max context length
+  V: int  # vocab size
+
+# torchtitan —— 什么都没有
+def forward(self, x: torch.Tensor) -> torch.Tensor:
+```
+
+### 两条分野
+
+**① PyTorch 生态 → T0；JAX/Google 生态 → T1.5**
+
+一个合理解释：**JAX 代码大量用 `einsum`，而 einsum 的字符串本身就是形状标注** ——
+`jnp.einsum('BLD,DHK->BLHK', inputs_BLD, w_q_DHK)` 里字符串和后缀天然对齐、互相校验。
+PyTorch 更多用 `.view()/.transpose()`，没有这种对应，后缀就成了纯额外负担。
+
+**② 库的定位决定要不要 T1**
+
+torchrl 是**给外部用户的库**，形状错了必须给好报错 → 上 T1。
+verl / torchtitan 是**给专家读的实现**，假定使用者知道形状 → 不上。
+
+### 关于 T2 和 CS336
+
+CS336 要求 jaxtyping 是**教学选择**，不是行业实践 —— 那门课整节在做
+`(B,L,D) -> (B,L,H,K)` 的变换，把形状放进类型系统能让学生的错误第一时间报出来。
+**生产代码假定你已经会了**。
+
+同理 torchtitan 的「什么都不写」不是懒 —— 它是 reference implementation，
+目标是代码尽可能短、让人看清算法骨架，读者预设是 PyTorch 熟手。
+
+### 写 vs 读，要求不一样
+
+| | 要求 | 理由 |
+|---|---|---|
+| **T0** | **必须会写** | 六个库里五个在用，事实标准，成本一行 |
+| **T1.5** | **必须会读**，写不写随意 | 迟早要读 Gemma / MaxText / nanodo 血统的代码，不认识 `q_BxLxHxDh` 会读不懂 |
+| **T1** | **按场景** | 写库给别人用 → 上；写实验脚本 → 不必 |
+| **T2** | **知道存在即可** | 零个生产库在用 |
+
+> 最值钱的其实不在这四档里：是**读懂广播规则本身**（右对齐、左补 1）。
+> 上面所有机制都只是提醒，真正让你不出错的是知道 `(B,1)` 和 `(B,)` 相乘会发生什么。
+
+---
+
+## 本仓库采用的约定：T0 + T1 + T1.5
+
+学习阶段三种一起上 —— 生产代码假定你已经会了，而我们正在「会」的路上。
+
+### 字母表
+
+| 字母 | 含义 | 典型值 |
+|---|---|---|
+| `B` | batch（拍平后的时间步总数） | 1000 / 4000 / 5000 |
+| `O` | ob_dim（观测维度） | CartPole 4、HalfCheetah 17 |
+| `A` | ac_dim（**连续**动作的向量维度） | HalfCheetah 6、InvertedPendulum 1 |
+| `T` | 单条轨迹的长度 | 变长 |
+| `N` | 一个 batch 里的轨迹条数 | 变长 |
+
+> 离散动作**没有** `A` —— 一个动作就是一个整数，`actions` 是 `(B,)` 不是 `(B,A)`。
+> 这个不对称正是 `ac_dim` 两种含义的根源（见「本作业四个环境的真实维度」）。
+
+### 本作业主要张量的后缀
+
+| 变量 | 形状 | 后缀 |
+|---|---|---|
+| `obs` | `(B, O)` | `obs_BO` |
+| `actions`（离散） | `(B,)` | `actions_B` |
+| `actions`（连续） | `(B, A)` | `actions_BA` |
+| `q_values` / `advantages` / `values` | `(B,)` | `..._B` |
+| `log_prob` 求和**前**（连续） | `(B, A)` | `log_probs_BA` |
+| `log_prob` 求和**后** | `(B,)` | `log_probs_B` |
+
+**最后两行是这套记法的价值所在**：
+
+```python
+log_probs_BA = action_distribution.log_prob(actions_BA)   # (B, A)
+log_probs_B  = log_probs_BA.sum(dim=-1)                   # (B,)
+loss = -(log_probs_B * advantages_B).mean()               # 后缀对上了
+```
+
+如果漏了 `.sum(-1)`，代码会长成 `-(log_probs_BA * advantages_B)` ——
+`BA` 乘 `B` 一眼就不对。**这正是 `SHAPES.md` 开头那个静默广播 bug**，
+用后缀写出来就变成了可见的。
+
+### 三档各用在哪
+
+```python
+def forward(self, obs_BO: torch.Tensor) -> torch.Tensor:
+    """(B, O) -> (B,)                                    # T0：契约写出来
+    network 的 output_size=1，输出 (B,1)，squeeze 掉那根记账用的轴。
+    """
+    values_B1 = self.network(obs_BO)
+    assert values_B1.shape == (obs_BO.shape[0], 1), values_B1.shape   # T1：边界钉住
+    return values_B1.squeeze(-1)                          # T1.5：名字说清形状
+```
+
+- **T0** 放在**函数 docstring** —— 每个有形状变换的函数一行
+- **T1** 放在**边界**：函数入口、两个张量首次相遇处。starter code 自带的
+  `assert values.shape == q_values.shape`（`pg_agent.py:177`）就是这一档，**别删**
+- **T1.5** 用在**形状会变的局部变量**上。`x`、`i`、`loss` 这种不用加
+
+**不要三档都堆在每一行** —— 那样噪声盖过信号。判据：
+**这个量的形状会不会被搞错？** 会 → 上；不会 → 省掉。
 
 ## 复用检查表
 
