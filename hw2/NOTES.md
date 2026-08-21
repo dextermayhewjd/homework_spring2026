@@ -20,8 +20,8 @@
 | 阶段 | PDF 节 | 动的文件 | commit | 状态 |
 |---|---|---|---|---|
 | 0. 数据流打通 | —（前置） | `run.py` `utils.py` `policies.py` | `b14695f` | ✅ |
-| 1. Vanilla PG | §3 | `pg_agent.py` `policies.py` | `839e29c` `b049f09` +本次 | ✅ 8/8 |
-| 2. Baseline   | §4 | `critics.py` `pg_agent.py` | | ☐ |
+| 1. Vanilla PG | §3 | `pg_agent.py` `policies.py` | `839e29c` `b049f09` `f762a8b` | ✅ 8/8 |
+| 2. Baseline   | §4 | `critics.py` `pg_agent.py` | `3ca746e` `9cb3a21` `8422614` | ✅ 5/5 |
 | 3. GAE        | §5 | `pg_agent.py` | | ☐ |
 | 4. 调参       | §6 | 无代码改动 | — | ☐ |
 
@@ -449,31 +449,151 @@ H0（该坐标均值为 0）成立时 |t| 应服从 ~N(0,1)，约 5% 的坐标 |
 ## 阶段 2 — Neural Network Baseline（PDF §4）
 
 跑通目标：HalfCheetah `cheetah_baseline` 末尾 Eval return > 300。
+**实测 316.90，一次通过。**
 
 ### TODO 清单
 
-- [ ] `critics.py` `ValueCritic.forward`
-- [ ] `critics.py` `ValueCritic.update`：loss + optimizer step
-- [ ] `pg_agent.py` `_estimate_advantage`：跑 critic 拿 values
-- [ ] `pg_agent.py` `_estimate_advantage`：有 baseline、无 GAE 时的 advantages
-- [ ] `pg_agent.py` `update` step 4：做 `baseline_gradient_steps` 次 critic 更新
+- [x] `critics.py` `ValueCritic.forward` ✅
+- [x] `critics.py` `ValueCritic.update`：loss + optimizer step ✅
+- [x] `pg_agent.py` `_estimate_advantage`：跑 critic 拿 values ✅
+- [x] `pg_agent.py` `_estimate_advantage`：有 baseline、无 GAE 时的 advantages ✅
+- [x] `pg_agent.py` `update` step 4：做 `baseline_gradient_steps` 次 critic 更新 ✅
 
 ### 关键决定
 
-> TODO：critic 的训练目标用的是什么？为什么是它？
+**critic 的训练目标是蒙特卡洛回报，不是 bootstrap**
+
+`update(obs, q_values)` 里的 `q_values` 来自 `_calculate_q_vals`，
+docstring 写得很直白：**"Monte Carlo estimation of the Q function"** ——
+**从实际收到的奖励折扣加总，没有任何网络参与**。
+
+所以 critic 是个**纯监督回归器**：输入状态、标签是「从该状态实际拿到的回报」、
+loss 是 MSE。和 hw1 的行为克隆结构一样，只是标签从「专家动作」换成「实际回报」。
+
+| | Monte Carlo（本阶段） | Bootstrap / TD |
+|---|---|---|
+| 目标 | $\sum_{t'\ge t}\gamma^{t'-t}r_{t'}$ | $r_t+\gamma V_\phi(s_{t+1})$ |
+| 用到自己吗 | ❌ 纯真实奖励 | ✅ 用自己对下一状态的预测 |
+| 偏差 / 方差 | 无偏 / 大 | 有偏 / 小 |
+
+**但阶段 3 会引入 bootstrap** —— GAE 的 $\delta_t=r_t+\gamma V_\phi(s_{t+1})-V_\phi(s_t)$
+里那半截就是 TD target。这正是 `VARIANCE.md` 四技巧表里 GAE 那行「有偏」的来源，
+$\lambda$ 就是控制「用多少 bootstrap」的旋钮。
+
+> **一个只有读代码才发现的细节**：本作业里 critic 的训练目标**始终**是 MC，
+> 即使到了阶段 3 —— step 4 传的是 `q_values` 而不是 GAE 的 λ-return。
+> 真实的 PPO 实现通常把 critic 也回归到 `returns = advantages + values`，
+> 那个目标本身就是 bootstrap 的。两种都能用，作业选了简单的。
+
+**目标的合法性依赖 `-rtg`**
+
+PDF 式 (13) 里 $V^\pi(s_t)$ 的求和是**从 $t$ 开始**的，所以只有
+`_discounted_reward_to_go` 那一版才是合法目标。`_discounted_return` 那版
+（整条轨迹回报，每个 $t$ 相同）含了 $t$ 之前的奖励，不是 $V^\pi(s_t)$。
+
+**代码不强制这一点** —— `--use_baseline` 不带 `-rtg` 也能跑，critic 会安静地
+回归到错误目标。作业里 exp2 的命令带了 `-rtg`，所以没事。这个坑写进
+`critics.py` `update` 的 docstring 了。
+
+**`advantages = q_values - values` 必须全程 numpy**
+
+`_estimate_advantage` 的 docstring 明写 "Operates on flat 1D NumPy arrays"，
+但中间要问 critic（torch）。所以是 **numpy 进、借道 torch、numpy 出**：
+
+```python
+values = ptu.to_numpy(self.critic(ptu.from_numpy(obs)))
+```
+
+这不只是类型体操，是**在结构上保证 advantage 不带计算图**。
+`VARIANCE.md` 整套推导的前提是 $A$ 与 $\theta$ 无关，$\nabla$ 才能提到求和外：
+
+$$\frac1N\sum\nabla\log\pi\cdot A=\nabla\Big[\frac1N\sum\log\pi\cdot A\Big]$$
+
+若 $A$ 带计算图，$\nabla(\log\pi\cdot A)$ 会多出 $\log\pi\cdot\nabla A$ 一项，
+推导失效；而且 actor 的 `loss.backward()` 会把梯度灌进 critic ——
+critic 本该只学回归，却被推去最大化 return。
+**实测正确写法下，actor backward 之后 critic 梯度为 `None`，两网络完全隔离。**
+
+**actor 走 1 步、critic 走 `-bgs` 步的不对称**（阶段 1 已推导，这里落到代码）
+
+actor 的 $\nabla L=-\nabla J$ 只在当前 $\theta$、当前这批数据下成立，走一步就得重采样；
+critic 的 loss 是真回归损失，`(obs, q_values)` 就是个固定数据集，反复用完全合法。
+而且**必须多走几次** —— 实测 `-bgs` 5→1，critic 预测误差差 **8 倍**。
+
+### 验证记录
+
+`ValueCritic` 单元验证（回归一个已知函数 $V(s)=10s_0$，200 步）：
+
+| 检查 | 结果 |
+|---|---|
+| 真的学会了吗 | loss $105.7\to0.032$，平均绝对误差 **0.085**（真值范围 ±25）✅ |
+| loss 值对吗（对照手算 MSE） | `0.486065` vs `0.486065` ✅ |
+| assert 挡得住吗 | 喂 `(7,1)` 标签 → `AssertionError: (Size([7]), Size([7,1]))` ✅ |
+| `zero_grad` 生效吗 | 1 次 `0.165` / 2 次 `0.138`，不是 2× ✅ |
+| 标签是常数吗 | `requires_grad=False` ✅ |
+
+**不 squeeze 的代价**（同一回归任务，唯一区别是 loss 里 squeeze 与否）：
+
+| | 最终 loss | 预测与真值平均绝对误差 |
+|---|---|---|
+| squeeze 了 `(B,)` | 0.032 | **0.085** |
+| 没 squeeze `(B,1)` | 104.2 | **8.307** |
+
+没 squeeze 那版**根本没学会** —— MSE 广播成 $(B,B)$，它在最小化「每个预测 vs 每个目标」
+的两两误差，最优解是让预测恒等于目标的均值，网络退化成输出常数。
+
+`-bgs` 的效果（同一目标，100 轮，每轮换新数据）：
+
+| `-bgs` | 第 1 轮报出 | 第 100 轮报出 | 预测误差 |
+|---|---|---|---|
+| 1 | 30.74 | 0.353 | 0.456 |
+| 5 | 16.70 | 0.0028 | 0.056 |
+| 20 | 2.72 | 0.0001 | 0.014 |
+
+端到端：`use_baseline=True` 时 `pg_agent.update` 返回
+`{'Actor Loss': -2.5869, 'Baseline Loss': 0.8746}`，两条 loss 都进 `log.csv`。
 
 ### 踩的坑
 
-> TODO
->
-> 已知会拦你的两处，撞到了就照模板记下来：
-> - `_estimate_advantage` 里 `assert values.shape == q_values.shape`（网络输出是 `(batch,1)`）
-> - values 忘了转 numpy 导致梯度串到 actor 上（这个不报错，只是训练变怪）
+#### 预告的两条，实际都没撞上 —— 而且第二条的预告是错的
+
+阶段 1 结束时预埋了两条「已知会拦你的」，实测：
+
+| 预告 | 实际 |
+|---|---|
+| `assert values.shape == q_values.shape` 会撞（网络输出 `(batch,1)`） | **没撞** —— `forward` 里提前 squeeze 了，assert 直接过 |
+| values 忘转 numpy 导致梯度串到 actor，**「这个不报错」** | ❌ **预告错了**。实测 `q_values - values_tensor` 抛 `TypeError: unsupported operand type(s) for -: 'numpy.ndarray' and 'Tensor'`，**会崩** |
+
+第二条值得记：**numpy 在左、tensor 在右时，`numpy.__sub__` 不认识 Tensor，直接报错。**
+如果顺序反过来（`tensor - numpy`）才会静默产出带计算图的 tensor。
+本作业的写法是 `q_values - values`，正好是安全的那个方向。
+
+> **教训**：预埋的坑也要标「这是预测还是实测」。这条预告写得像实测结论，
+> 差点让我以为躲过了一个静默 bug，其实那个 bug 在这个方向上根本不存在。
+
+#### 坑：`self.critic(obs)` 直接喂 numpy
+
+第一次写成 `values = self.critic(obs)`，`obs` 是 numpy：
+
+```
+TypeError: linear(): argument 'input' (position 1) must be Tensor, not numpy.ndarray
+```
+
+会崩，安全。修法是两次转换（见「关键决定」）。
 
 ### 遗留疑问
 
-> TODO
-
+- [ ] **`-blr 0.001` 末期 loss 已追上默认配置**（19.12 vs 19.07），但最终 return
+      差了 460（-146 vs +317）。我在 REPORT §2.3 给的解释是「value target 非平稳，
+      critic 早期跟踪慢把 actor 带进坏轨迹，后来追上也回不来」。
+      **这个解释合理但没验证** —— 要验的话得看早期（前 20 轮）的 advantage 质量，
+      比如 corr(advantage, 真实 advantage)。没做。
+- [ ] critic 的**训练误差 vs 泛化误差**没区分。step 4 循环里取的是最后一次 loss，
+      那是拟合完这批数据后的**训练误差**。取第一次（没见过这批数据时）更像泛化误差。
+      两条曲线会不会讲不同的故事？没试。
+- [ ] `VARIANCE.md` 记了「$V^\pi$ 不是方差最小的 baseline，最优的是
+      $\lVert\nabla\log\pi\rVert^2$ 加权的回报」。那个最优 baseline 在这里能不能算、
+      算了有多少提升？没试。
 ---
 
 ## 阶段 3 — Generalized Advantage Estimation（PDF §5）
