@@ -1,7 +1,8 @@
 # 方差：策略梯度的核心问题
 
-> **这份记什么**：一个小到能把所有情况列全的例子，把「删掉一个期望为零的项 ——
-> 期望不变、方差变小」这件事算到底。以及为什么方差在 RL 里比在监督学习里危险得多。
+> **这份记什么**：一个小到能把所有情况列全的例子，把「删掉一个期望为零的项」这件事算到底 ——
+> 期望不变是**定理**，方差变小**不是**（28% 的构造里反过来）。
+> 以及为什么方差在 RL 里比在监督学习里危险得多。
 >
 > **不记什么**：
 > - 「公式怎么翻译成代码」→ `FORMULA_TO_CODE.md`
@@ -99,12 +100,129 @@ $t$ 往后走一步，$P_t$ 多吃一个奖励、$F_t$ 就少一个，和不变�
 
 所以删掉 $\sum_t X_t$：
 
-- **期望一分不变** —— 你估计的还是同一个东西，无偏性保住
-- **方差变小** —— 估计更准
-- **代价为零**
+- **期望一分不变** —— 你估计的还是同一个东西，无偏性保住 ← **这是定理**
+- **方差通常变小** —— 但**不保证**，见下节
+- 在实际环境上代价为零
 
 `NOTES.md` 阶段 1 有 score function 恒等式 $\mathbb{E}_{a\sim\pi}[\nabla_\theta\log\pi_\theta(a|s)]=0$
 的形式推导。这里不重复，改用一个能手算验证的例子。
+
+---
+
+## ⚠️ 三条命题的地位完全不同
+
+这份文件（和多数教材）容易让人把三件事当成同样确定，其实差别很大。
+
+| # | 命题 | 地位 |
+|---|---|---|
+| 1 | 删掉零均值项**不改变期望** | ✅ **定理**，无条件成立 |
+| 2 | reward-to-go 的**方差一定更小** | ❌ **不是定理**，是经验规律 |
+| 3 | **方差小 ⇒ 收敛快** | ⚠️ 是 **SGD** 的定理，搬到 RL 前提不满足 |
+
+### 命题 1 —— 定理
+
+靠期望的线性性 + score function 恒等式，无条件成立。
+穷举 2401 组奖励配置（$H=2$、每步 2 动作、每个奖励取 $-3\ldots 3$），**2401/2401 全部成立**。
+
+### 命题 2 —— 不是定理，28% 的构造里反过来
+
+同样 2401 组，**624 组里 trajectory-centric 的方差反而更小**：
+
+| 类别 | 组数 | traj 方差更小 | 占比 |
+|---|---|---|---|
+| 两步奖励都与动作有关 | 1764 | 498 | **28.2%** |
+| 只第 0 步与动作有关 | 294 | 64 | 21.8% |
+| 只第 1 步与动作有关 | 294 | 48 | 16.3% |
+| 都与动作无关（退化） | 49 | 14 | 28.6% |
+
+非退化的具体反例：$r_0=(-3,-2)$、$r_1=(1,2)$
+$\Rightarrow\operatorname{Var}(\text{traj})=3.00<\operatorname{Var}(\text{rtg})=3.50$，两者期望都是 $-1.00$。
+
+**原因在协方差项**：
+
+$$\operatorname{Var}\Big(\underbrace{\hat g_{\text{rtg}}}_{A}+\underbrace{\textstyle\sum_t X_t}_{B}\Big)=\operatorname{Var}(A)+\operatorname{Var}(B)+2\operatorname{Cov}(A,B)$$
+
+删掉 $B$ 能降方差，需要 $\operatorname{Var}(B)+2\operatorname{Cov}(A,B)>0$。
+$\operatorname{Var}(B)>0$ 是有的，但**如果 $\operatorname{Cov}(A,B)$ 足够负，$B$ 其实在起对冲作用**，删了反而更抖。
+
+最极端的退化例：奖励完全不依赖动作时 $R(\tau)$ 是常数，
+$\hat g_{\text{traj}}$ **恒等于 0**（方差 0），而 $\hat g_{\text{rtg}}$ 仍在抖。
+
+> **所以「reward-to-go 降低方差」是经验规律，不是数学保证。**
+> 它在实际环境上确实成立 —— CartPole 实测方差比 5–12（见后文）——
+> 但那是该环境的性质。教材里通常直接断言这一条，跳过了协方差这一步。
+
+### 命题 3 —— 是 SGD 的定理，不是 RL 的定理
+
+严格的部分：$f$ 为 $L$-smooth、梯度无偏且方差有界 $\sigma^2$，SGD 跑 $T$ 步、步长 $\eta$：
+
+$$\min_{t<T}\mathbb{E}\lVert\nabla f(\theta_t)\rVert^2\;\le\;\underbrace{\frac{2\big(f(\theta_0)-f^*\big)}{\eta T}}_{\text{确定性进展}}+\underbrace{\eta L\sigma^2}_{\text{噪声地板}}$$
+
+取最优 $\eta$ 后，达到 $\epsilon$ 精度需要 $T=O\!\big(L\Delta\sigma^2/\epsilon^2\big)$ —— **$T$ 线性于 $\sigma^2$**。这条是真定理。
+
+但搬到 RL，四个前提全破：
+
+| 定理的前提 | RL 里 |
+|---|---|
+| 目标函数 $f$ 固定 | ❌ 采样分布是 $\pi_\theta$，$\theta$ 一动目标就动 |
+| $\sigma^2$ 是一个常数上界 | ❌ 实测 0.055 → 339.9，训练中变了约 6000 倍 |
+| 「收敛」= $\lVert\nabla f\rVert$ 或 $f-f^*$ 达标 | ❌ 「Eval return 首次到 200」是另一个量的阈值穿越 |
+| 梯度**无偏** | ❌ GAE（$\lambda<1$）与 advantage normalization 都是**有偏**的 |
+
+还有一条常被忽略：**上界有两项**。训练早期第一项主导，方差几乎不影响；
+只有进入**噪声主导区**（后期）$T\propto\sigma^2$ 才生效。
+「方差小 ⇒ 快」是渐近成立，不是全程成立。
+
+第四条尤其要命：对**有偏**的手段（GAE、normalization），
+「方差更小」推不出「更快收敛到正确的东西」—— 偏差可能主导。那是折中，不是白拿。
+
+### RL 文献里严格的部分
+
+**baseline 作为 control variate（控制变量）** 有经典蒙特卡洛理论支撑：
+减去一个与被估计量相关、且期望已知的量，可在不引入偏差的前提下降低方差。
+
+一个可能出乎意料的结论：**$V^\pi(s)$ 并不是方差最小的 baseline**。最优的是
+
+$$b^*=\frac{\mathbb{E}\big[\lVert\nabla_\theta\log\pi_\theta\rVert^2\,R\big]}{\mathbb{E}\big[\lVert\nabla_\theta\log\pi_\theta\rVert^2\big]}$$
+
+即用 $\lVert\nabla\log\pi\rVert^2$ 加权的回报。$V^\pi$ 只是好用、够好、可学的近似。
+
+> 文献指路（凭印象给，引用前自己核）：Greensmith–Bartlett–Baxter, JMLR 2004,
+> *Variance Reduction Techniques for Gradient Estimates in RL*；
+> 策略梯度的全局收敛率见 Agarwal–Kakade–Lee–Mahajan, JMLR 2021。
+
+### 一句话
+
+**「减小方差让训练更快收敛」不是定理，是有理论方向指引的强启发式** ——
+机制清楚、在标准环境上反复验证有效，但没有任何定理说
+「RL 里梯度方差降 $k$ 倍，达到某 return 阈值的样本量就降 $k$ 倍」。
+
+### 可复现
+
+```python
+import itertools, numpy as np
+def stats(A, B, C, D):                      # H=2，每步 2 动作，50/50，γ=1
+    r0 = lambda a: A if a == 0 else B       # 第 0 步奖励
+    r1 = lambda a: C if a == 0 else D       # 第 1 步奖励
+    s  = lambda a: 1.0 if a == 0 else -1.0  # score
+    gt, gr = [], []
+    for a0, a1 in itertools.product([0, 1], [0, 1]):
+        R = r0(a0) + r1(a1)
+        gt.append(s(a0) * R + s(a1) * R)                        # trajectory-centric
+        gr.append(s(a0) * (r0(a0) + r1(a1)) + s(a1) * r1(a1))   # reward-to-go
+    gt, gr = np.array(gt), np.array(gr)
+    return gt.mean(), gr.mean(), gt.var(), gr.var()
+
+vals = np.arange(-3, 4, 1.0)
+same_mean = worse = total = 0
+for A, B, C, D in itertools.product(vals, repeat=4):
+    mt, mr, vt, vr = stats(A, B, C, D)
+    total += 1
+    same_mean += abs(mt - mr) < 1e-9
+    worse += vt < vr - 1e-9
+print(f"期望相等 {same_mean}/{total}；traj 方差更小 {worse}/{total}")
+# 期望相等 2401/2401；traj 方差更小 624/2401
+```
 
 ---
 
