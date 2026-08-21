@@ -21,11 +21,15 @@ for cand in ("Noto Sans CJK JP", "Noto Sans CJK SC", "WenQuanYi Zen Hei", "DejaV
 plt.rcParams["axes.unicode_minus"] = False
 
 
-def load(run_dir):
+def load(run_dir, ycol="Eval_AverageReturn"):
+    """读一个 run 的 (x, y)。ycol 不存在时返回 None —— 例如 use_baseline=False 的 run
+    没有 Baseline Loss 这一列（self.critic is None，step 4 整段跳过）。"""
     with open(os.path.join(run_dir, "log.csv")) as f:
         rows = list(csv.DictReader(f))
+    if not rows or ycol not in rows[0] or rows[0][ycol] == "":
+        return None
     return ([float(r["Train_EnvstepsSoFar"]) for r in rows],
-            [float(r["Eval_AverageReturn"]) for r in rows])
+            [float(r[ycol]) for r in rows])
 
 
 def find(exp_name):
@@ -36,13 +40,17 @@ def find(exp_name):
     return hits[0]
 
 
-def plot(names, labels, title, subtitle, outfile):
+def plot(names, labels, title, subtitle, outfile, ycol="Eval_AverageReturn", ylabel=None, logy=False):
     fig, ax = plt.subplots(figsize=(7.2, 4.4), dpi=200)
     fig.patch.set_facecolor(SURFACE); ax.set_facecolor(SURFACE)
 
     ends = []
     for i, name in enumerate(names):
-        x, y = load(find(name))
+        got = load(find(name), ycol)
+        if got is None:                     # 该 run 没有这一列，跳过（并说明，不静默丢）
+            print(f"     跳过 {name}：log.csv 里没有 '{ycol}' 列")
+            continue
+        x, y = got
         ax.plot(x, y, color=SERIES[i], lw=2, solid_joinstyle="round",
                 solid_capstyle="round", label=labels[i], zorder=3)
         ax.plot(x[-1], y[-1], "o", ms=8, color=SERIES[i], mec=SURFACE, mew=2, zorder=4)
@@ -57,7 +65,9 @@ def plot(names, labels, title, subtitle, outfile):
     ax.set_title(title, fontsize=12, color=INK, loc="left", pad=18, fontweight="bold")
     ax.text(0, 1.02, subtitle, transform=ax.transAxes, fontsize=9, color=INK2, va="bottom")
     ax.set_xlabel("Train_EnvstepsSoFar（环境步数）", fontsize=9, color=INK2)
-    ax.set_ylabel("Eval_AverageReturn", fontsize=9, color=INK2)
+    ax.set_ylabel(ylabel or ycol, fontsize=9, color=INK2)
+    if logy:
+        ax.set_yscale("log")
     ax.grid(axis="y", color=GRID, lw=1, ls="-"); ax.set_axisbelow(True)
     for s in ("top", "right"): ax.spines[s].set_visible(False)
     for s in ("left", "bottom"): ax.spines[s].set_color(GRID)
@@ -79,5 +89,36 @@ if __name__ == "__main__":
         plot(["cartpole_lb", "cartpole_lb_rtg", "cartpole_lb_na", "cartpole_lb_rtg_na"], L,
              "CartPole-v0 学习曲线 —— 大 batch (b=4000)",
              "四种 return estimator / advantage 归一化组合；200 为该环境的 return 上限", "exp1_large_batch.png")
+    elif which == "exp2":
+        BASE = [
+            "cheetah_baseline",
+            "cheetah_baseline_blr0.001",
+            "cheetah_baseline_bgs1",
+        ]
+        BL = [
+            "默认：-blr 0.01 / -bgs 5",
+            "仅降 -blr：0.001",
+            "仅降 -bgs：1",
+        ]
+        # 图一：baseline loss —— cheetah 没有 baseline，不参与
+        plot(BASE, BL,
+             "HalfCheetah-v4 baseline loss —— critic 的回归误差",
+             "分别降低 critic 学习率与每轮更新次数；纵轴对数刻度",
+             "exp2_baseline_loss.png", ycol="Baseline Loss",
+             ylabel="Baseline Loss (MSE)", logy=True)
+        # 图二：eval return —— 无 baseline + 默认 baseline + 两个单变量消融
+        plot(["cheetah"] + BASE, ["无 baseline"] + BL,
+             "HalfCheetah-v4 eval return",
+             "验收线：cheetah_baseline 末尾 > 300",
+             "exp2_eval_return.png")
+        # Optional 直接对比：突出 advantage normalization 对 actor 学习的影响。
+        # na run 同时开启了视频采样，因此图中明确标注，不将差异全部归因于 -na。
+        plot(
+            ["cheetah_baseline", "cheetah_baseline_na_video"],
+            ["默认 baseline", "baseline + -na (+ video)"],
+            "HalfCheetah-v4 advantage normalization 对比",
+            "两者 critic 超参相同；optional run 另开启了视频采样",
+            "exp2_na_comparison.png",
+        )
     else:
         raise SystemExit(f"未知实验：{which}")

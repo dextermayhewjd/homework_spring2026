@@ -198,11 +198,13 @@ uv run src/scripts/run.py --env_name CartPole-v0 --no_gpu -n 100 -b 4000 -rtg -n
 
 ### 2.1 运行记录
 
-| exp_name | use_baseline | -blr | -bgs | 最终 Eval_AverageReturn | run 目录 |
-|---|---|---|---|---|---|
-| `cheetah`          | ✗ | — | — | | |
-| `cheetah_baseline` | ✓ | 0.01 | 5 | | |
-| `cheetah_baseline_<变体>` | ✓ | | | | |
+| exp_name | use_baseline | -blr | -bgs | -na | video freq | 最终 Eval_AverageReturn | run 目录 |
+|---|---|---|---|---|---|---|---|
+| `cheetah` | ✗ | — | — | ✗ | -1 | -257.57 | `HalfCheetah-v4_cheetah_sd1_20260821_135111` |
+| `cheetah_baseline` | ✓ | 0.01 | 5 | ✗ | -1 | **316.90** | `HalfCheetah-v4_cheetah_baseline_sd1_20260821_135111` |
+| `cheetah_baseline_blr0.001` | ✓ | **0.001** | 5 | ✗ | -1 | -146.19 | `HalfCheetah-v4_cheetah_baseline_blr0.001_sd1_20260821_135111` |
+| `cheetah_baseline_bgs1` | ✓ | 0.01 | **1** | ✗ | -1 | -113.96 | `HalfCheetah-v4_cheetah_baseline_bgs1_sd1_20260821_135111` |
+| `cheetah_baseline_na_video` | ✓ | 0.01 | 5 | ✓ | 10 | **428.03** | `HalfCheetah-v4_cheetah_baseline_na_video_sd1_20260821_135111` |
 
 **验收线**：`cheetah_baseline` 末尾 Eval return 要 > 300。跑 2–3 次还到不了就回去查实现。
 
@@ -210,24 +212,96 @@ uv run src/scripts/run.py --env_name CartPole-v0 --no_gpu -n 100 -b 4000 -rtg -n
 
 ![HalfCheetah baseline loss 曲线](report/exp2_baseline_loss.png)
 
+图中的 baseline loss 是 critic 在当前 batch 上完成指定次数更新后的 MSE。默认配置
+(`-blr 0.01 -bgs 5`) 最快降到较低误差区间；只更新一次的 `-bgs 1` 在训练后期仍有明显更高的
+回归误差。`-blr 0.001` 的早期下降更慢，虽然后期 loss 追上了默认配置，但已经错过了早期为 actor
+提供准确 advantage 的时机。
+
 ![HalfCheetah eval return 曲线](report/exp2_eval_return.png)
+
+默认 baseline 的 eval return 在约 320K 环境步后超过 0，并最终达到 **316.90**；其余三条主实验曲线
+在训练结束时仍为负回报。这说明不仅需要 value baseline，critic 还必须以足够快的速度跟踪当前 policy 的
+value target。
+
+![HalfCheetah baseline 与 advantage normalization 对比](report/exp2_na_comparison.png)
+
+第三张图将 critic 超参完全相同的默认 baseline 与 `baseline + -na` 直接对比。加入 advantage normalization
+的 optional run 最终从 **316.90** 提高到 **428.03**，且末 10 轮平均 return 为 **390.00**，高于默认 baseline
+的 **328.64**。不过 optional run 还开启了视频轨迹采样，因此该图用于展示表现差异，不将全部增益严格归因于 `-na`。
 
 ### 2.3 问题
 
-**Q. 降低 `-bgs` 或 `-blr` 后，(a) baseline 学习曲线怎么变？(b) 策略性能怎么变？**
+**Q. 分别降低 `-bgs` 和 `-blr` 后，(a) baseline 学习曲线怎么变？(b) 策略性能怎么变？**
 
-> TODO（记清楚你改的是哪一个、从多少改到多少）
+#### Reward-to-go 与 value baseline
+
+所有主实验都已使用 reward-to-go：
+
+$$
+\hat Q_t^{\mathrm{RTG}}=\sum_{t'=t}^{T}\gamma^{t'-t}r_{t'}
+$$
+
+它去掉了动作之前的奖励，改善了时间上的 credit assignment，但后续轨迹的随机性仍会使
+$\hat Q_t$ 有较高方差。本实验的 baseline 就是学习得到的 state-value function：
+
+$$
+V_\phi(s_t)\approx\mathbb E_\pi[\hat Q_t^{\mathrm{RTG}}\mid s_t],
+\qquad
+\hat A_t=\hat Q_t^{\mathrm{RTG}}-V_\phi(s_t)
+$$
+
+Actor 使用 $\hat A_t$ 而不是原始 $\hat Q_t$ 作为 $\log\pi_\theta(a_t\mid s_t)$ 的权重。这会减去“当前状态本身容易或困难”
+带来的回报波动，使更新主要取决于当前动作是否优于该状态下的平均水平。因为 baseline 不依赖当前动作，
+理论上它不改变 policy-gradient 的期望方向，却能降低有限样本下的估计方差。
+
+在 actor learning rate `0.01` 和 discount factor $\gamma=0.95$ 都不变时，只用 reward-to-go 的最终
+`Eval_AverageReturn` 为 **-257.57**，加入默认 value baseline 后提高到 **316.90**。因此 reward-to-go
+并未完全解决高方差问题，状态相关的 value baseline 对 HalfCheetah 的稳定学习至关重要。
+
+#### 降低 baseline learning rate：`0.01 → 0.001`
+
+| 配置 | 初始 Baseline Loss | 最终 Baseline Loss | 末 10 轮 loss 均值 | 最终 Eval return |
+|---|---:|---:|---:|---:|
+| 默认 `blr=0.01, bgs=5` | 163.88 | 14.59 | 19.07 | **316.90** |
+| `blr=0.001, bgs=5` | 219.84 | 18.93 | 19.12 | -146.19 |
+| `blr=0.01, bgs=1` | 241.12 | 45.41 | 36.23 | -113.96 |
+
+将 `-blr` 降低十倍后，critic 在早期对当前 reward-to-go target 的拟合明显更慢，策略最终只达到
+**-146.19**。它的末期 loss 已接近默认配置，所以不应简单说“critic 始终没有收敛”。更准确的解释是：
+policy 在不断改变，value target 也是非平稳的；较小的 critic learning rate 使 value function 早期跟踪太慢，
+向 actor 提供了质量较差的 advantage estimates。即使 critic 后期误差追上，actor 在早期走入的训练轨迹也不会自动恢复。
+
+#### 降低 baseline gradient steps：`5 → 1`
+
+将 `-bgs` 从 5 降到 1 后，critic 每个 batch 只进行一次回归更新。其末 10 轮 baseline loss 均值从 **19.07**
+上升到 **36.23**，最终 loss 达到 **45.41**，显示 critic 对当前 target 有明显的 underfitting。因此
+$\hat A_t=\hat Q_t-V_\phi(s_t)$ 中的 $V_\phi$ 不够准确，降方差效果变差，最终 eval return 只有 **-113.96**。
+
+#### Advantage normalization
+
+Optional run 进一步对 advantage 做 batch normalization：
+
+$$
+\tilde A_t=\frac{\hat A_t-\mu_A}{\sigma_A+\epsilon}
+$$
+
+它同时居中 advantage 并统一不同 batch 的梯度尺度，本次 `cheetah_baseline_na_video` 获得了最高的最终
+return **428.03**。这说明 advantage normalization 在本任务中非常有效，但该 run 还同时开启了视频轨迹采样，
+会改变随机数消耗和后续训练数据；因此它是 optional enhanced run，不能将相对默认 baseline 的全部提升严格归因于 `-na`。
 
 ### 2.4 完整命令
 
 ```bash
-# TODO
+uv run src/scripts/run.py --no_gpu --env_name HalfCheetah-v4 -n 100 -b 5000 -eb 3000 -rtg --discount 0.95 -lr 0.01 --exp_name cheetah
+uv run src/scripts/run.py --no_gpu --env_name HalfCheetah-v4 -n 100 -b 5000 -eb 3000 -rtg --discount 0.95 -lr 0.01 --use_baseline -blr 0.01 -bgs 5 --exp_name cheetah_baseline
+uv run src/scripts/run.py --no_gpu --env_name HalfCheetah-v4 -n 100 -b 5000 -eb 3000 -rtg --discount 0.95 -lr 0.01 --use_baseline -blr 0.001 -bgs 5 --exp_name cheetah_baseline_blr0.001
+uv run src/scripts/run.py --no_gpu --env_name HalfCheetah-v4 -n 100 -b 5000 -eb 3000 -rtg --discount 0.95 -lr 0.01 --use_baseline -blr 0.01 -bgs 1 --exp_name cheetah_baseline_bgs1
+uv run src/scripts/run.py --no_gpu --env_name HalfCheetah-v4 -n 100 -b 5000 -eb 3000 -rtg --discount 0.95 -lr 0.01 --use_baseline -blr 0.01 -bgs 5 -na --video_log_freq 10 --exp_name cheetah_baseline_na_video
 ```
 
 ### 2.5 可选
 
-- [ ] 加回 `-na` 看提升多少
-- [ ] `--video_log_freq 10`，在 WandB 里看 HalfCheetah 跑起来
+- [x] 在同一个 optional run 中加回 `-na` 并设置 `--video_log_freq 10`
 
 ---
 
@@ -333,10 +407,11 @@ uv run src/scripts/run.py --env_name CartPole-v0 --no_gpu -n 100 -b 4000 -rtg -n
 - [ ] `CartPole-v0_cartpole_lb_rtg_sd*`
 - [ ] `CartPole-v0_cartpole_lb_na_sd*`
 - [ ] `CartPole-v0_cartpole_lb_rtg_na_sd*`
-- [ ] `HalfCheetah-v4_cheetah_sd*`
-- [ ] `HalfCheetah-v4_cheetah_baseline_sd*`
-- [ ] `HalfCheetah-v4_cheetah_baseline_<变体>_sd*` —— §2.3 那个降 `-bgs` / `-blr` 的对比实验。
-      PDF §7 的目录树没列它，但 §4.2 的 deliverable 要求跑；grader 按前缀匹配，多一个目录无害
+- [x] `HalfCheetah-v4_cheetah_sd*`
+- [x] `HalfCheetah-v4_cheetah_baseline_sd*`
+- [x] `HalfCheetah-v4_cheetah_baseline_blr0.001_sd*` —— 只降 `-blr`
+- [x] `HalfCheetah-v4_cheetah_baseline_bgs1_sd*` —— 只降 `-bgs`
+      PDF §7 的目录树没列这两个额外消融，但 grader 按前缀匹配，多目录无害
 - [ ] `LunarLander-v2_lunar_lander_lambda0_sd*`
 - [ ] `LunarLander-v2_lunar_lander_lambda0.95_sd*`
 - [ ] `LunarLander-v2_lunar_lander_lambda0.98_sd*`
