@@ -163,11 +163,28 @@ def main(args):
     # Create directory for logging
     logdir_prefix = "exp"  # Keep for autograder
 
-    exp_name = f"{args.env_name}_{args.exp_name}_sd{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # 本地目录保留环境、seed 和时间戳：避免重跑覆盖，并满足 autograder 命名。
+    run_dir_name = f"{args.env_name}_{args.exp_name}_sd{args.seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # W&B 已经有 project/group 层级和内部 run id，display name 只保留配置名与 seed。
+    wandb_name = f"{args.exp_name}_sd{args.seed}"
 
-    config = vars(args)
-    setup_wandb(project='cs285_hw2', name=exp_name, config=config)
-    args.save_dir = os.path.join(logdir_prefix, exp_name)
+    # run_experiments.sh 通过环境变量为同一道实验的多个 run 分组。
+    # 直接运行本文件时两者可以为空，不影响原有用法。
+    wandb_group = os.environ.get("HW2_WANDB_GROUP")
+    batch_id = os.environ.get("HW2_BATCH_ID")
+    config = vars(args).copy()
+    config.update(
+        experiment_group=wandb_group,
+        batch_id=batch_id,
+        run_dir_name=run_dir_name,
+    )
+    setup_wandb(
+        project='cs285_hw2',
+        group=wandb_group,
+        name=wandb_name,
+        config=config,
+    )
+    args.save_dir = os.path.join(logdir_prefix, run_dir_name)
     os.makedirs(args.save_dir, exist_ok=True)
     logger = Logger(os.path.join(args.save_dir, 'log.csv'))
 

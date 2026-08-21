@@ -9,6 +9,10 @@ dist/
 .ruff_cache/
 
 exp/
+exp_archive/
+
+# mujoco 运行时产物（OpenGL 警告日志），每次跑 HalfCheetah/InvertedPendulum 都会重新生成
+MUJOCO_LOG.TXT
 
 exp_stdout/
 REPORT.pdf
