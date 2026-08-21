@@ -606,7 +606,141 @@ TypeError: linear(): argument 'input' (position 1) must be Tensor, not numpy.nda
 
 ### 关键决定
 
-> TODO：`terminals` 是怎么用来切断轨迹边界的？为什么要在 values 后面 append 一个 0？
+**式 (18)→(22) 的五步变形：每一步在干什么**
+
+$$\underbrace{(18)}_{\substack{\text{有限 }H\\ \text{带归一化}}}
+\xrightarrow[\ \lambda^{H-t-1}\to0\ ]{H\to\infty}
+\underbrace{(19)}_{\text{只剩 }(1-\lambda)}
+\xrightarrow[\ A_n=\sum\gamma^k\delta\ ]{\text{交换求和次序}}
+\underbrace{(20)}_{(\gamma\lambda)^k\delta}
+\xrightarrow[\ \text{截断到 }H\ ]{}
+\underbrace{(21)}_{\text{有限和}}
+\xrightarrow{\text{提公因子}}
+\underbrace{(22)}_{\text{递推},\ O(H)}$$
+
+**要实现的是最右边那个。** 中间四步是等价变形，PDF 列出来是为了说明「凭什么可以这么算」。
+
+**(18)→(19)：归一化常数塌缩**
+
+$\lambda<1$，所以 $H\to\infty$ 时 $\lambda^{H-t-1}\to 0$：
+
+$$\frac{1-\lambda}{1-\lambda^{H-t-1}}\;\longrightarrow\;\frac{1-\lambda}{1}=1-\lambda$$
+
+式 (19) 前面那个孤零零的 $(1-\lambda)$ 就是这么来的。
+
+**(19)→(20)：γ 去哪了？—— 它一直藏在 $A_n$ 内部**
+
+式 (19) 里只有 $\lambda^{n-1}$ 的权重衰减，看不到 $\gamma$；式 (20) 却冒出 $(\gamma\lambda)^k$。
+原因是这个恒等式 —— **n-step advantage 本身就是 $\delta$ 的 $\gamma$-折扣和**：
+
+$$A_n(s_t)=\sum_{k=0}^{n-1}\gamma^k\delta_{t+k}$$
+
+靠 telescoping 证：
+
+$$\sum_{k=0}^{n-1}\gamma^k\delta_{t+k}=\sum_k\gamma^k\big[r_{t+k}+\gamma V(s_{t+k+1})-V(s_{t+k})\big]$$
+$$=\sum_k\gamma^k r_{t+k}+\underbrace{\sum_{j=1}^{n}\gamma^{j}V(s_{t+j})-\sum_{j=0}^{n-1}\gamma^{j}V(s_{t+j})}_{\text{中间项两两抵消，只剩首尾}}
+=\sum_k\gamma^k r_{t+k}+\gamma^n V(s_{t+n})-V(s_t)$$
+
+右边正是 $A_n$ 的定义（式 17）。**中间所有 $V$ 都消掉了。**
+
+代进式 (19) 并交换求和次序（固定 $k$，有贡献的是 $n\ge k+1$）：
+
+$$A^{\text{GAE}}=(1-\lambda)\sum_{k=0}^{\infty}\gamma^k\delta_{t+k}\underbrace{\sum_{n=k+1}^{\infty}\lambda^{n-1}}_{=\ \lambda^k/(1-\lambda)}=\sum_{k=0}^{\infty}(\gamma\lambda)^k\delta_{t+k}$$
+
+$(1-\lambda)$ 被几何级数求和抵消，$\gamma^k\lambda^k$ 合并成 $(\gamma\lambda)^k$。
+
+**$\gamma$ 和 $\lambda$ 的分工**（到式 20 才合并，不代表它们本来是一回事）：
+
+| | 作用 | 在哪层 |
+|---|---|---|
+| $\gamma$ | **时间折扣** —— 未来的奖励值多少钱 | 每个 $A_n$ **内部** |
+| $\lambda$ | **估计量加权** —— 用多少 1 步、多少 2 步…… | $A_n$ **之间** |
+
+**数值验证**（$\gamma{=}0.9,\lambda{=}0.95$，$r=[1,2,0,3,1,2]$，$V=[5,4,6,2,3,1]$）：
+
+| 检查 | 结果 |
+|---|---|
+| $A_n(s_t)\overset{?}{=}\sum\gamma^k\delta_{t+k}$，全部 $(t,n)$ 组合 | 全部一致 |
+| $(1-\lambda)\sum_n\lambda^{n-1}A_n\overset{?}{=}\sum_k(\gamma\lambda)^k\delta_{t+k}$ | 差 $2\times10^{-15}$（浮点精度） |
+
+**不要按式 (18) 字面实现 —— 那是 $O(H^3)$**
+
+式 (18) 的直接翻译是「先算出所有 n-step advantage $A_n$，再加权平均」：
+
+$$A^{\text{GAE}}(s_t)=\frac{1-\lambda}{1-\lambda^{H-t-1}}\sum_{n=1}^{H-t-1}\lambda^{n-1}A_n(s_t)$$
+
+对每个 $t$ 要算 $H-t$ 个 $A_n$，每个 $A_n$ 本身是 $n$ 项求和 → **$O(H^3)$**。
+LunarLander 的 `--ep_len 1000` 下是 $10^9$ 次运算，一条轨迹就跑不动。
+
+式 (20)→(21) 的恒等式把整个加权平均塌成对 $\delta$ 的几何加权和：
+
+$$A^{\text{GAE}}(s_t)=\sum_{t'=t}^{H-1}(\gamma\lambda)^{t'-t}\delta_{t'}
+\quad\Longrightarrow\quad A_t=\delta_t+\gamma\lambda A_{t+1}$$
+
+倒扫一遍，**$O(H)$**。数值验证过（$\gamma{=}0.9,\lambda{=}0.95$，$r=[1,2,0,3]$，$V=[5,4,6,2]$）：
+
+| | 结果 |
+|---|---|
+| 加权所有 $A_n$（式 18） | `[0.0617, 0.54, -3.345, 1.0]` |
+| 倒序递推（式 22） | `[0.0617, 0.54, -3.345, 1.0]` |
+
+完全一致。**递推法根本不生成 $A_n$ 那张中间表。**
+
+> 这和阶段 1 `_discounted_reward_to_go` 是**同一个模式** —— 正序 $O(H^2)$ vs 倒序 $O(H)$，
+> 区别只是这次被折叠的是 $\delta$ 而不是 $r$。
+> 「遇到后缀求和就找递推」在这份作业里出现了两次。
+
+**单步循环体只需要相邻两项**
+
+```
+δ_i = r_i + γ·V(s_{i+1}) − V(s_i)      ← 一步 TD 误差
+A_i = δ_i + γλ·A_{i+1}                  ← 用上一轮刚算出的结果
+```
+
+用到的全是**当前 i 和 i+1**，没有任何跨多步的求和。这就是为什么循环外要预留两格：
+
+```python
+values = np.append(values, [0])           # 让 V(s_{i+1}) 在 i 是最后一行时不越界
+advantages = np.zeros(batch_size + 1)     # 让 A_{i+1} 同理取到 0
+```
+
+**又是阶段 1 `running = 0.0` 那一招** —— 用虚拟边界值免掉特判。三次了。
+
+**`batch_size` 是拍平后的时间步总数，不是轨迹条数**
+
+```python
+batch_size = obs.shape[0]
+```
+
+| | 值 |
+|---|---|
+| `-b` / `args.batch_size` | **最少**要采多少步 |
+| `obs.shape[0]` | 实际总步数，**≥ `-b`**（轨迹不截断，跑完才停） |
+
+实测：HalfCheetah `-b 5000` 每轮恰好 5000（轨迹固定 1000 步，整除）；
+CartPole `-b 1000` 是 `1012, 1010, 1016, 1038, 1099…`，范围 `[1000, 1199]` ——
+**轨迹长度可变，每轮 batch_size 都不同**。
+
+所以循环扫的是**一条跨越多条轨迹的长数组**：
+
+```
+obs       [轨迹1 的 T₁ 步 | 轨迹2 的 T₂ 步 | 轨迹3 的 T₃ 步]
+terminals [0,0,…,0,1     | 0,0,…,0,1     | 0,0,…,0,1     ]
+                      ↑ 边界          ↑ 边界
+```
+
+`for i in reversed(range(batch_size))` 从最后一条轨迹的末尾一路倒扫到第一条的开头。
+**不管边界的话，轨迹 2 的第一步会去用轨迹 3 的 advantage。**
+这就是 `terminals` 存在的全部理由 —— 阶段 1 记的那句
+「语义边界被搬进了 `terminals`，阶段 3 的 GAE 递推就必须靠它断开」在这里兑现。
+
+**`terminals[i]==1` 时两处都要归零**
+
+该行是所在轨迹的最后一步，`values[i+1]` 和 `advantages[i+1]` 都属于**下一条轨迹**，不能用。
+PDF 式 (16) 下面给的边界情形 $\delta_{H-1}=r_{H-1}-V_\phi(s_{H-1})$ 就是把 $\gamma V_\phi(s_{t+1})$ 那项去掉。
+
+两种写法：乘掩码 `* (1 - terminals[i])`，或显式 `if`。
+**掩码更简洁，且是生产代码的普遍写法**（verl / torchrl 的 GAE 都是掩码版）。
 
 ### 踩的坑
 
@@ -614,7 +748,13 @@ TypeError: linear(): argument 'input' (position 1) must be Tensor, not numpy.nda
 
 ### 遗留疑问
 
-> TODO：比如 PDF 式 (18) 有个归一化常数 1/(1-λ^(H-t-1))，式 (21) 的递推实现里去哪了？
+- [x] ~~式 (18) 的归一化常数 $\frac{1-\lambda}{1-\lambda^{H-t-1}}$ 在式 (21) 的递推实现里去哪了？~~
+      **答**：PDF 从 (19) 到 (21) **换了 horizon 假设，没有严格保持归一化**。
+      (18) 是有限 $H$、权重严格和为 1；(19)(20) 取 $H\to\infty$，常数塌成 $1-\lambda$；
+      (21) 再把 (20) 的无穷和**截断回 $H-1$**。
+      所以**式 (21) 不完全等于式 (18)** —— 它丢掉了 $t'\ge H$ 的尾巴。
+      实践中无所谓：$(\gamma\lambda)^{H-t}$ 在轨迹够长时已极小，且末尾用 $V(s_H)=0$ 收尾。
+      **所有主流实现（verl / torchrl / SB3）都用 (21)/(22)，没人管那个归一化常数。**
 
 ---
 
