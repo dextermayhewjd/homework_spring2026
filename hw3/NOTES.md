@@ -23,7 +23,7 @@
 |---|---|---|---|---|---|
 | 0. 环境 | §1 | 无代码改动 | 六个 env 都能 make/reset/step | — | ✅ |
 | 1. 基础 DQN | §2.4 | `dqn_agent.py` `run_dqn.py` | CartPole-v1 训练中**至少一次** eval return = 500 | 本次 | ✅ 40 个评估点中 10 次 500 |
-| 2. Double-Q | §2.5 | `dqn_agent.py` | LunarLander-v2 ≥ 200；MsPacman ≈ 1500 | | ⬜ |
+| 2. Double-Q | §2.5 | `dqn_agent.py` | LunarLander-v2 ≥ 200；MsPacman ≈ 1500 | 本次 | 🔄 LunarLander ✅ 17 次≥200；MsPacman 跑中 |
 | 3. 超参敏感性 | §2.6 | 新增 yaml（无源码改动） | LunarLander 4 组设置同图 | | ⬜ |
 | 4. SAC 数据流 + bootstrapping | §3.1–3.2 | `run_sac.py` `sac_agent.py` | InvertedPendulum Q 值稳定（不发散、不恒零） | | ⬜ |
 | 5. 熵 bonus | §3.3 | `sac_agent.py` | InvertedPendulum entropy → ≈ log 2 ≈ 0.69 | | ⬜ |
@@ -324,28 +324,144 @@ LunarLander 网络宽 4 倍（256）届时重测；MsPacman 是 CNN，必然用 
 
 ### TODO 清单
 
-- [ ] `dqn_agent.py` `update_critic` 的 `if self.use_double_q:` 分支 —— 标记是 `TODO(Section 2.5)`
-      **只改 `next_action_B` 那一行**：argmax 换成在线网络 `self.critic`，取值仍走 `next_qa_values_BA`
-      （= target 网络）。`next_q_values_B` 和 `target_values_B` 都不动 —— 当初拆四步就是为这一刻。
+- [x] `dqn_agent.py` `update_critic` 的 `if self.use_double_q:` 分支 ✅ 手算用例验证
+      —— 只改了 `next_action_B` 那一行，`next_q_values_B` / `target_values_B` 原样未动。
+      当初把 target 那块拆成四步，就是为了这一刻只需改一行。
 
 ### 关键决定
 
-> TODO
+**在线网络的输出内联，不落变量**
+
+```python
+next_action_B = self.critic(next_obs).argmax(dim=-1)
+```
+
+一度写成先存 `original_next_qa_values_BA = self.critic(next_obs)` 再 argmax。内联的理由：
+它只用一次，落变量反而要给它起名，而任何带 `next_qa_values` 字样的名字都会和
+target 那个混淆 —— 见下面「踩的坑 ①」，那个 bug 正是这么来的。
 
 ### 验证记录
 
 > 验收命令：
 > ```
-> uv run src/scripts/run_dqn.py -cfg experiments/dqn/lunarlander.yaml     # 期望 ≥ 200
+> uv run src/scripts/run_dqn.py -cfg experiments/dqn/lunarlander.yaml     # 期望 ≥ 200，GPU，约 17 分钟
 > uv run src/scripts/run_dqn.py -cfg experiments/dqn/mspacman.yaml        # 期望 ≈ 1500，约 3h
 > ```
 > `lunarlander.yaml` 里已经是 `use_double_q: true`。
 
-> TODO
+**双分支手算用例**（把源码块抽出来 exec，两个网络喂固定值）
+
+```
+target Q_φ'(s',·) = [[1,5,2], [4,0,1]]
+online Q_φ (s',·) = [[9,3,4], [0,8,2]]
+```
+
+| `use_double_q` | `next_action_B` | `next_q_values_B` | 手算 |
+|---|---|---|---|
+| `False` | `[1, 0]` | `[5.0, 4.0]` | target 自己 argmax，取 target 的值 ✅ |
+| `True` | `[0, 1]` | `[1.0, 0.0]` | online argmax，取 **target** 的值 ✅ |
+
+第 0 行最有鉴别力：online 挑了动作 0（它自己给 9.0），但取回来的是 `target[0]=1.0`。
+**这个「悲观」就是消除高估偏差的全部机制** —— 在线网络看好的动作，
+在 target 眼里可能很差，取 target 的值就不会把 max 的乐观偏差传下去。
+
+**LunarLander 正式验收** —— `exp/LunarLander-v2_dqn_sd1_20260825_153744`
+
+| 指标 | 结果 |
+|---|---|
+| 50 个评估点中 `Eval_AverageReturn ≥ 200` | **17 次** |
+| 首次达标 | step **260,000**（241.5） |
+| 最好 / 最终 | **274.0** / 224.7 |
+| step ≥ 300,000 的 20 个评估点 | 14 个 ≥200 |
+
+PDF 要求「至少一次 ≥200」，达标且非偶然。图见 `report/stage2_lunarlander.png`。
+
+**GPU vs CPU（20000 步基准，`setup_wandb` 打桩以免污染 W&B）**
+
+| | CartPole（hidden 64，4.6K 参数） | LunarLander（hidden 256，69K 参数） |
+|---|---|---|
+| CPU | **1038** it/s | 369 it/s |
+| GPU | 871 it/s | **493** it/s |
+| 结论 | CPU 快 19% | **GPU 快 34%** |
+
+账在网络规模上翻转：15 倍参数量让矩阵乘终于压过 host→device 拷贝。
+**LunarLander 不要加 `--no_gpu`。**
+
+**为什么 GPU 利用率只有 14~20%**（`nvidia-smi dmon` 实测）
+
+显存 490 MiB 里几乎没有模型：critic 270 KB、加 target 和 Adam 两个动量约 1 MB，
+其余全是 CUDA context（驱动 + cuBLAS/cuDNN kernel），是碰 CUDA 的固定开销。
+利用率低是因为**延迟受限而非吞吐受限** —— 每步里 `env.step()`（Box2D，CPU）、
+`get_action` 的单样本 PCIe 往返、`replay_buffer.sample` 的 numpy 索引都在 CPU 上，
+GPU 只在 `update` 那几个 64×256 的矩阵乘上干几十微秒。不用管，20% 的 4090 仍比 CPU 快 34%。
+
+**MsPacman 会完全不同**（算过的账）：
+
+| | 参数量 | 每样本 MACs | batch | 每次更新 MACs |
+|---|---|---|---|---|
+| LunarLander MLP | 69,124 | 68,608 | 64 | 4.4 M |
+| MsPacman CNN | 1,688,745 | 9,347,584 | 32 | **299 M（68×）** |
+
+单样本算力 136×。传输量涨得更凶（2 KB → 1764 KB，880×），但 1.7 MB 走 PCIe 4.0
+只要约 70 μs，而 299M MACs 即使只发挥 10% 也是几百 μs —— **算力这次是主项**。
+（Atari 存 uint8 而非 float32，传输已省 4 倍；除以 255 放在 GPU 上做，
+就是 `PreprocessAtari` 那一层的意义。）
+所以 MsPacman 必须用 GPU，CPU 跑不动。
+
+⚠️ **但「GPU 利用率会显著提高」这个预测是错的** —— 实测 `nvidia-smi dmon` 仍是
+0~32%、均值约 15%，和 LunarLander 差不多。算漏的一步：299M MACs 在 4090
+（~80 TFLOPS fp32）上只有 **~7.5 μs** 纯计算，基数太小，乘 68 倍还是微不足道。
+瓶颈只是**换了个 CPU 环节**，没有离开 CPU：ALE 模拟、帧预处理（灰度 + 缩放到 84×84）、
+以及 `MemoryEfficientReplayBuffer.sample` 用两层 fancy indexing 拼 `(32,4,84,84)` uint8
+（每次约 900 KB 的 numpy gather）。
+
+显存同样印证：540 MiB vs LunarLander 的 490 MiB —— **参数量 24 倍，显存只多 10%**。
+1.69M 参数 ×4 字节 ×4 份（网络 + target + Adam 两个动量）≈ 27 MB，加卷积激活约 50 MB，
+其余全是 CUDA context。replay buffer 在 CPU 内存里，不占显存。
+
+**教训：估 GPU 负载要看绝对耗时，不能只看相对倍数。** 68× 一个微不足道的量
+仍然微不足道。判据应是「单次更新的 GPU 计算时间是否可与 env.step + 数据准备相比」。
+
+实测速率 **≈321 it/s**，100 万步约 **52 分钟** —— 比 PDF 说的「约 3 小时」快得多，
+那个估计应该是按较弱硬件给的。
 
 ### 踩的坑
 
-> TODO
+**① 覆盖 `next_qa_values_BA` 会把 double-Q 变成比 vanilla 更糟的东西**
+
+一度写成：
+
+```python
+if self.use_double_q:
+    next_qa_values_BA = self.critic(next_obs)          # ← 覆盖了 target 的输出
+    next_action_B = next_qa_values_BA.argmax(dim=-1)
+```
+
+后面 `gather(next_qa_values_BA, ...)` 拿到的就成了**在线网络**的值，
+「选」和「取值」塌缩成同一个网络，target 网络彻底不参与。数值上：
+
+| 写法 | 选 a' 用 | 取值用 | 结果（target=[1,5,2], online=[9,3,4]） |
+|---|---|---|---|
+| vanilla | target | target | 5.0 |
+| 覆盖版（错） | online | **online** | **9.0** ← 高估比 vanilla 还严重 |
+| 正确 double-Q | online | **target** | **1.0** |
+
+**不报错、能跑、只是学错。** PDF §2.5 那两个式子的下标是不同的（φ 选、φ' 取值），
+下标就是全部机制。
+
+**② `WANDB_MODE=disabled` 不生效，但 `wandb.init(mode="disabled")` 生效**
+
+跑基准时想避开 W&B。环境变量被 `run_dqn.py:224` 的 `mode="online"` 覆盖（阶段 1 已记）。
+第一次试着把 `setup_wandb` 打桩成 no-op —— **失败**：`Logger.log` 里无条件调
+`wandb.log()`，没 init 过就抛 `You must call wandb.init() before wandb.log()`。
+可行的写法是让桩去做一次禁用式 init：
+
+```python
+import scripts.run_dqn as m
+m.setup_wandb = lambda **kw: wandb.init(mode="disabled")
+```
+
+这样 `wandb.log` 变成本地空操作，服务器上也不建 run。**之后所有冒烟/基准测试都该这么跑。**
 
 ### 遗留疑问
 

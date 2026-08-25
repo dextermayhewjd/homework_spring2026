@@ -88,7 +88,7 @@ class DQNAgent(nn.Module):
 
             if self.use_double_q:
                 # TODO(Section 2.5): implement double-Q target action selection
-                next_action_B = None
+                next_action_B: torch.Tensor = self.critic(next_obs).argmax(dim=-1)
             else:
                 # 选 a'：哪个动作的 Q 最大。argmax 消掉动作轴，BA -> B，值即动作编号。
                 next_action_B: torch.Tensor = next_qa_values_BA.argmax(dim=-1)
