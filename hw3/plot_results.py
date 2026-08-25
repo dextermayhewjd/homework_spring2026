@@ -126,6 +126,11 @@ def plot_train_vs_eval(prefix, title, subtitle, outfile, threshold, smooth_w=40)
                 solid_joinstyle="round", solid_capstyle="round")
 
     ax.set_xlim(0, max(x_e[-1], x_t[-1]) * 1.02)
+    # y 轴按【平滑后】的范围定，不让 train 的原始尖峰（最高 3940）把纵轴撑到 4000 ——
+    # 那会把 PDF 要看的早期差异压成一条缝。原始尖峰因此会被裁掉，副标题里写明。
+    lo = min(min(smooth(y_t, smooth_w)), min(smooth(y_e, 5)))
+    hi = max(max(smooth(y_t, smooth_w)), max(smooth(y_e, 5)))
+    ax.set_ylim(min(0, lo), hi * 1.18)
     ax.set_title(title, fontsize=12, color=INK, loc="left", pad=18, fontweight="bold")
     ax.text(0, 1.02, subtitle, transform=ax.transAxes, fontsize=9, color=INK2, va="bottom")
     ax.set_xlabel("环境步数（step）", fontsize=9, color=INK2)
@@ -136,6 +141,23 @@ def plot_train_vs_eval(prefix, title, subtitle, outfile, threshold, smooth_w=40)
     ax.tick_params(colors=INK2, labelsize=8, length=0)
     # 两条序列 ⇒ legend 必须有（dataviz 规则：身份不能只靠颜色）
     ax.legend(frameon=False, fontsize=8, labelcolor=INK2, loc="upper left")
+
+    # PDF 问的是【早期】差异，但早期在全程尺度上被压扁。放大 0~25 万步这一段。
+    zoom = 250_000
+    ins = ax.inset_axes([0.53, 0.07, 0.44, 0.36])
+    ins.set_facecolor(SURFACE)
+    for (x, y, c, w) in ((x_t, y_t, SERIES[1], smooth_w), (x_e, y_e, SERIES[0], 5)):
+        ys = smooth(y, w)
+        xs = [a for a in x if a <= zoom]
+        ins.plot(xs, ys[:len(xs)], color=c, lw=2)
+    ins.set_xlim(0, zoom)
+    ins.grid(axis="y", color=GRID, lw=0.8); ins.set_axisbelow(True)
+    for sp in ("top", "right"): ins.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"): ins.spines[sp].set_color(GRID)
+    ins.tick_params(colors=INK2, labelsize=7, length=0)
+    ins.set_title("放大：前 25 万步（ε 从 1.00 降到 0.55）", fontsize=8, color=INK2,
+                  loc="left", pad=4)
+    ax.indicate_inset_zoom(ins, edgecolor=GRID, alpha=0.9)
     fig.tight_layout()
     os.makedirs("report", exist_ok=True)
     fig.savefig(os.path.join("report", outfile), facecolor=SURFACE, bbox_inches="tight")
@@ -157,7 +179,7 @@ if __name__ == "__main__":
     elif which == "stage2-mspacman":
         plot_train_vs_eval("MsPacman_dqn",
              "MsPacman —— Double-Q DQN：train return vs eval return（PDF §2.5）",
-             "淡线为原始值，粗线为滑动平均（train 窗口 40 条 episode，eval 窗口 5 个评估点）",
+             "粗线为滑动平均，淡线为原始值；纵轴按平滑曲线定范围（train 原始值最高 3940 超出画面）",
              "stage2_mspacman.png", threshold=1500)
     else:
         raise SystemExit(f"未知阶段：{which}")
