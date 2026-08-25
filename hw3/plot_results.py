@@ -100,6 +100,48 @@ def plot(prefix, title, subtitle, outfile, threshold):
     plt.close(fig); print(f"  OK  report/{outfile}")
 
 
+def plot_train_vs_eval(prefix, title, subtitle, outfile, threshold, smooth_w=40):
+    """PDF §2.5 的 MsPacman 交付物：train return 与 eval return 画在同一轴上。
+
+    这里**要**平滑，和单曲线图的判据相反：train return 是逐 episode 记录的（上千条），
+    原始值密到读不出来；而且这张图要比较的是两条曲线的【水平差异】，是趋势问题，
+    不是「有没有触到某个尖峰」。两条序列同等处理：淡线原始 + 粗线平滑。
+    """
+    run = find(prefix)
+    x_e, y_e = load(run, "Eval_AverageReturn")
+    x_t, y_t = load(run, "Train_EpisodeReturn")
+
+    fig, ax = plt.subplots(figsize=(7.6, 4.6), dpi=200)
+    fig.patch.set_facecolor(SURFACE); ax.set_facecolor(SURFACE)
+    ax.axhline(threshold, color=INK2, lw=1, ls=(0, (4, 3)), zorder=1)
+    ax.text(x_e[-1] * 0.012, threshold, f"验收线 {threshold:g}", fontsize=8, color=INK2,
+            va="bottom", ha="left")
+
+    # alpha 按点数调：train 有上千条 episode，0.18 叠起来会糊成一片色雾盖住信号；
+    # eval 只有 100 个点，需要看得见。
+    for (x, y, c, lab, w, a) in ((x_t, y_t, SERIES[1], "train return（训练中的 episode 回报）", smooth_w, 0.10),
+                                 (x_e, y_e, SERIES[0], "eval return（贪心策略，10 条轨迹平均）", 5, 0.22)):
+        ax.plot(x, y, color=c, lw=1, alpha=a, zorder=2)
+        ax.plot(x, smooth(y, w), color=c, lw=2, zorder=3, label=lab,
+                solid_joinstyle="round", solid_capstyle="round")
+
+    ax.set_xlim(0, max(x_e[-1], x_t[-1]) * 1.02)
+    ax.set_title(title, fontsize=12, color=INK, loc="left", pad=18, fontweight="bold")
+    ax.text(0, 1.02, subtitle, transform=ax.transAxes, fontsize=9, color=INK2, va="bottom")
+    ax.set_xlabel("环境步数（step）", fontsize=9, color=INK2)
+    ax.set_ylabel("Return", fontsize=9, color=INK2)
+    ax.grid(axis="y", color=GRID, lw=1, ls="-"); ax.set_axisbelow(True)
+    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"): ax.spines[sp].set_color(GRID)
+    ax.tick_params(colors=INK2, labelsize=8, length=0)
+    # 两条序列 ⇒ legend 必须有（dataviz 规则：身份不能只靠颜色）
+    ax.legend(frameon=False, fontsize=8, labelcolor=INK2, loc="upper left")
+    fig.tight_layout()
+    os.makedirs("report", exist_ok=True)
+    fig.savefig(os.path.join("report", outfile), facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig); print(f"  OK  report/{outfile}")
+
+
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "stage1"
     if which == "stage1":
@@ -112,5 +154,10 @@ if __name__ == "__main__":
              "LunarLander-v2 —— Double-Q DQN 学习曲线（PDF §2.5）",
              "每 10000 步评估 10 条轨迹取平均；use_double_q=true",
              "stage2_lunarlander.png", threshold=200)
+    elif which == "stage2-mspacman":
+        plot_train_vs_eval("MsPacman_dqn",
+             "MsPacman —— Double-Q DQN：train return vs eval return（PDF §2.5）",
+             "淡线为原始值，粗线为滑动平均（train 窗口 40 条 episode，eval 窗口 5 个评估点）",
+             "stage2_mspacman.png", threshold=1500)
     else:
         raise SystemExit(f"未知阶段：{which}")

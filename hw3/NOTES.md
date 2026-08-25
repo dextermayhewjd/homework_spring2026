@@ -8,6 +8,8 @@
 > - 「数学公式怎么机械地翻译成 PyTorch 代码」→ `../hw2/FORMULA_TO_CODE.md`（跨作业复用，不 fork）
 > - 「张量形状/轴怎么想、哪些形状错误不报错」→ `../hw2/SHAPES.md`（同上）
 > - 「因子多到跑不完全因子时怎么设计消融」→ `../hw2/ABLATION.md`（§2.6 调参会用到）
+> - 「为什么 DQN 到连续动作就失效、actor 怎么绕过 argmax」→ `FROM_DQN_TO_SAC.md`
+>   （本次新增，同样跨作业复用 —— hw4/hw5/final project 碰连续控制都是这条链）
 >
 > 分界线：**读最终代码的人需要知道的** 留在代码里；**只有写代码的我经历过的** 留在这里。
 >
@@ -23,7 +25,7 @@
 |---|---|---|---|---|---|
 | 0. 环境 | §1 | 无代码改动 | 六个 env 都能 make/reset/step | — | ✅ |
 | 1. 基础 DQN | §2.4 | `dqn_agent.py` `run_dqn.py` | CartPole-v1 训练中**至少一次** eval return = 500 | 本次 | ✅ 40 个评估点中 10 次 500 |
-| 2. Double-Q | §2.5 | `dqn_agent.py` | LunarLander-v2 ≥ 200；MsPacman ≈ 1500 | 本次 | 🔄 LunarLander ✅ 17 次≥200；MsPacman 跑中 |
+| 2. Double-Q | §2.5 | `dqn_agent.py` | LunarLander-v2 ≥ 200；MsPacman ≈ 1500 | 本次 | ✅ LunarLander 17 次≥200；MsPacman 最好 1924 |
 | 3. 超参敏感性 | §2.6 | 新增 yaml（无源码改动） | LunarLander 4 组设置同图 | | ⬜ |
 | 4. SAC 数据流 + bootstrapping | §3.1–3.2 | `run_sac.py` `sac_agent.py` | InvertedPendulum Q 值稳定（不发散、不恒零） | | ⬜ |
 | 5. 熵 bonus | §3.3 | `sac_agent.py` | InvertedPendulum entropy → ≈ log 2 ≈ 0.69 | | ⬜ |
@@ -465,7 +467,17 @@ m.setup_wandb = lambda **kw: wandb.init(mode="disabled")
 
 ### 遗留疑问
 
-> PDF 要求解释：MsPacman 的 train return 和 eval return 早期为什么差别很大？
+~~PDF 要求解释：MsPacman 的 train return 和 eval return 早期为什么差别很大？~~ ✅ 已答，见 `REPORT.md` §2.4。
+
+一句话：**train 走 ε-greedy、eval 走纯贪心**（`utils.py:37` 不传 epsilon）。
+决定性证据是 ε 衰减到 0.01 后两条线合并（step 100 万时 train 1460 / eval 1356，
+eval 反被超过）—— 若差异另有来源，不会随 ε 一起消失。
+已排除环境差异：`atari_dqn_config.make_env` 忽略 `eval` 参数，
+`wrap_deepmind` 未接 `ClipRewardEnv`、`terminal_on_life_loss=False`。
+
+⚠️ 反直觉的一点：**step 0 处 eval 反而更低**（60 vs 211）。
+对随机初始化的网络取 argmax 是个**退化的确定性策略**，比均匀随机还差。
+eval 不是天然更高，只是不交探索税。
 
 ---
 
@@ -653,8 +665,8 @@ PDF §3.1 分了两档。**必读**（"you'll need to take a look at"）：
 `exp/` 里必须有这 7 个 run（按前缀识别，即目录名 `_sd` 之前的部分）：
 
 - [x] `CartPole-v1_dqn_sd*` ✅ `exp/CartPole-v1_dqn_sd1_20260825_151358/`
-- [ ] `LunarLander-v2_dqn_sd*`
-- [ ] `MsPacman_dqn_sd*`
+- [x] `LunarLander-v2_dqn_sd*` ✅ `exp/LunarLander-v2_dqn_sd1_20260825_153744/`
+- [x] `MsPacman_dqn_sd*` ✅ `exp/MsPacman_dqn_sd1_20260825_155618/`
 - [ ] `HalfCheetah-v4_sac_sd*`
 - [ ] `HalfCheetah-v4_sac_autotune_sd*`
 - [ ] `Hopper-v4_sac_singleq_sd*`

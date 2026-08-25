@@ -88,7 +88,54 @@ uv run src/scripts/run_dqn.py -cfg experiments/dqn/lunarlander.yaml
 
 ### 2.4 MsPacman
 
-> 待跑。PDF 要求把 `train return` 和 `eval return` 画在同一张图上并解释早期差异。
+| run 目录 | seed | 设备 | 总步数 | 评估点 | Eval 最好 | ≥1500 次数 | 首次达标 |
+|---|---|---|---|---|---|---|---|
+| `MsPacman_dqn_sd1_20260825_155618` | 1 | GPU (RTX 4090) | 1,000,000 | 100 | **1924.0** | 15 | step **370,000** |
+
+配置 `experiments/dqn/mspacman.yaml`（`base_config: dqn_atari`）：CNN critic（1,688,745 参数）、
+`lr=1e-4`、`adam_eps=1e-4`、`batch_size=32`、`clip_grad_norm=10.0`、`use_double_q=true`。
+实际耗时约 52 分钟，比 PDF 估的「约 3 小时」快得多。
+
+![MsPacman 的 train return 与 eval return 同轴对比；淡线为原始值，粗线为滑动平均（train 窗口 40 条 episode、eval 窗口 5 个评估点）](report/stage2_mspacman.png)
+
+#### 为什么 train return 和 eval return 早期差别很大
+
+**根因是两者用的策略不同：train return 由 ε-greedy 行为策略产生，eval return 由纯贪心策略产生。**
+
+`run_dqn.py` 的训练循环把 `exploration_schedule.value(step)` 算出的 ε 传给 `get_action`；
+而评估路径（`utils.py:37`）调用 `policy.get_action(ob)` **不传 epsilon**，走默认 `0.0`。
+Atari 的 ε 调度是「前 20,000 步保持 1.0，然后线性降到 50 万步的 0.01」，
+所以训练早期绝大多数动作是随机的，train return 反映的是一个**几乎随机的策略**。
+
+实测（train 取邻近 40 条 episode 的均值，消除单条 episode 的噪声）：
+
+| step | ε | train | eval | eval/train |
+|---|---|---|---|---|
+| 0 | 1.00 | 211 | **60** | **0.28** |
+| 50,000 | 0.94 | 240 | 510 | **2.13** |
+| 100,000 | 0.83 | 261 | 460 | 1.76 |
+| 200,000 | 0.63 | 478 | 589 | 1.23 |
+| 400,000 | 0.22 | 987 | 1408 | 1.43 |
+| 700,000 | **0.01** | 1143 | 1444 | 1.26 |
+| 1,000,000 | **0.01** | 1460 | 1356 | **0.93** |
+
+**最有说服力的是最后两行：ε 衰减到 0.01 之后两条曲线合并，eval 甚至被 train 反超。**
+如果差异来自别的原因（环境不同、指标定义不同），它不会随 ε 一起消失。
+
+另外两个次要因素：
+
+1. **step 0 处 eval 反而更低（60 vs 211）。** 此时 Q 网络是随机初始化的，
+   「对随机网络取 argmax」是一个**退化的确定性策略** —— 相似状态永远选同一个动作，
+   在 MsPacman 里比均匀随机还差（后者至少会到处走动）。
+   这一点也说明 eval 并非天然更高，它只是不用交探索税。
+2. **统计口径不同。** eval 是 10 条轨迹的平均，train 是**单条 episode** 的回报，
+   噪声大得多；而且 train return 在 episode **结束时**才记录，
+   一条长 episode 的回报反映的是它**开始时**的策略，天然滞后。
+
+**排除了的因素**：train 和 eval 用的是同一个环境。`atari_dqn_config.make_env` 忽略了
+`eval` 参数，且 `wrap_deepmind` 没有接 `ClipRewardEnv`、`terminal_on_life_loss=False`，
+`RecordEpisodeStatistics` 还包在最外层（记录的是**未经 frame-skip / 裁剪**的原始回报）。
+所以不存在「训练用裁剪奖励、评估用真实奖励」这类常见混淆。
 
 ---
 
