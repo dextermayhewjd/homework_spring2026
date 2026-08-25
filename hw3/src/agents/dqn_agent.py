@@ -84,14 +84,14 @@ class DQNAgent(nn.Module):
             # 后缀 B = batch_size，A = 动作轴长度（DQN 下即 num_actions）。
 
             # 下一状态、所有动作的 Q 值。用 target 网络 Q_θ̄，不是在线网络。
-            next_qa_values_BA:torch.Tensor = self.target_critic(next_obs)
+            next_qa_values_BA: torch.Tensor = self.target_critic(next_obs)
 
             if self.use_double_q:
                 # TODO(Section 2.5): implement double-Q target action selection
                 next_action_B = None
             else:
                 # 选 a'：哪个动作的 Q 最大。argmax 消掉动作轴，BA -> B，值即动作编号。
-                next_action_B:torch.Tensor = next_qa_values_BA.argmax(dim=-1)
+                next_action_B: torch.Tensor = next_qa_values_BA.argmax(dim=-1)
 
             # 按列号取值：每行从 A 个 Q 里挑出 next_action_B 指定的那一个。BA + B -> B。
             # gather 要求 index 与 input 同维，故先 unsqueeze(1) 成 (B,1)，取完再 squeeze 回 (B,)。
@@ -107,13 +107,17 @@ class DQNAgent(nn.Module):
             # ENDTODO
 
         # TODO(Section 2.4): train the critic with the target values
-        qa_values = self.critic(obs) #这里是（BA）
-        q_values = torch.gather(
-            qa_values,dim=1,index=action.unsqueeze(1)
+        # 在线网络 Q_θ 对【当前】状态前向。和上半段结构相同，只是换了网络和观测。
+        qa_values_BA: torch.Tensor = self.critic(obs)
+        # 按列号取值，但列号是【实际执行过的】动作（buffer 里存的），不是 argmax。
+        # action 从 buffer 出来就是 int64，gather 要的正是 int64，不用转。
+        q_values_B = torch.gather(
+            qa_values_BA, dim=1, index=action.unsqueeze(1)
         ).squeeze(1)
+        assert q_values_B.shape == (batch_size,), q_values_B.shape
         # self.critic_loss 是 __init__ 里建好的 nn.MSELoss()：平方 + 对 B 取平均，
         # 把 (B,) 的逐样本误差收成 0 维标量，backward() 才有唯一的求导目标。
-        loss = self.critic_loss(q_values, target_values_B)
+        loss = self.critic_loss(q_values_B, target_values_B)
         # ENDTODO
 
         self.critic_optimizer.zero_grad()
@@ -127,7 +131,7 @@ class DQNAgent(nn.Module):
 
         return {
             "critic_loss": loss.item(),
-            "q_values": q_values.mean().item(),
+            "q_values": q_values_B.mean().item(),
             "target_values": target_values_B.mean().item(),
             "grad_norm": grad_norm.item(),
         }

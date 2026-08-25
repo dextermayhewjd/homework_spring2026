@@ -86,9 +86,9 @@ double-Q 留到阶段 2。
 
 **下面两项 PDF 没点名，是我自己加的**：
 
-- [ ] `src/networks/critics.py` `DQNCritic.forward` 的输入输出形状（docstring 里写了）
+- [x] `src/networks/critics.py` `DQNCritic.forward` 的输入输出形状 ✅ `(B, *obs_shape) -> (B, num_actions)`
       —— 加它是因为写 `update_critic` 时要靠这个形状推 `gather` 那一步
-- [ ] PDF §2.3（不是 §2.2）列的三个已实现 trick：exploration schedule / lr schedule / grad clipping
+- [x] PDF §2.3（不是 §2.2）列的三个已实现 trick：exploration schedule / lr schedule / grad clipping ✅ 见接口速查的两 config 对比表
       —— 不用写，但要能在 `dqn_config.py` 里指出它们各自的实体
 
 ### 接口速查
@@ -313,9 +313,10 @@ LunarLander 网络宽 4 倍（256）届时重测；MsPacman 是 CNN，必然用 
 
 - `get_action` 没加 `torch.no_grad()`。不加不会错（`ptu.to_numpy` 有 `.detach()`），
   只是每个环境步白建一次计算图。CartPole 无所谓，MsPacman 跑 1e6 步时回来评估。
-- 字母表要为 hw3 扩一个：hw2 的表写着「离散动作没有 `A`」，但 DQN critic 的输出
-  **有**一根真正的动作轴。暂定 `A` = 动作轴长度（DQN 下 = `num_actions`，SAC 下 = `ac_dim`）。
-  定稿后补进 `../hw2/SHAPES.md`。
+- 字母表已为 hw3 扩了一个：hw2 的表写着「离散动作没有 `A`」，但 DQN critic 的输出
+  **有**一根真正的动作轴。现采用 `A` = 动作轴长度（DQN 下 = `num_actions`，SAC 下 = `ac_dim`），
+  代码里已在用（`next_qa_values_BA`）。**待办：回填进 `../hw2/SHAPES.md` 的字母表**，
+  否则那份文档和实际用法就对不上了。
 
 ---
 
@@ -324,6 +325,8 @@ LunarLander 网络宽 4 倍（256）届时重测；MsPacman 是 CNN，必然用 
 ### TODO 清单
 
 - [ ] `dqn_agent.py` `update_critic` 的 `if self.use_double_q:` 分支 —— 标记是 `TODO(Section 2.5)`
+      **只改 `next_action_B` 那一行**：argmax 换成在线网络 `self.critic`，取值仍走 `next_qa_values_BA`
+      （= target 网络）。`next_q_values_B` 和 `target_values_B` 都不动 —— 当初拆四步就是为这一刻。
 
 ### 关键决定
 
@@ -533,7 +536,7 @@ PDF §3.1 分了两档。**必读**（"you'll need to take a look at"）：
 
 `exp/` 里必须有这 7 个 run（按前缀识别，即目录名 `_sd` 之前的部分）：
 
-- [ ] `CartPole-v1_dqn_sd*`
+- [x] `CartPole-v1_dqn_sd*` ✅ `exp/CartPole-v1_dqn_sd1_20260825_151358/`
 - [ ] `LunarLander-v2_dqn_sd*`
 - [ ] `MsPacman_dqn_sd*`
 - [ ] `HalfCheetah-v4_sac_sd*`
