@@ -22,7 +22,7 @@
 | 阶段 | PDF 节 | 动的文件 | 验收标准 | commit | 状态 |
 |---|---|---|---|---|---|
 | 0. 环境 | §1 | 无代码改动 | 六个 env 都能 make/reset/step | — | ✅ |
-| 1. 基础 DQN | §2.4 | `dqn_agent.py` `run_dqn.py` | CartPole-v1 训练中**至少一次** eval return = 500 | | ⬜ |
+| 1. 基础 DQN | §2.4 | `dqn_agent.py` `run_dqn.py` | CartPole-v1 训练中**至少一次** eval return = 500 | 本次 | ✅ 40 个评估点中 10 次 500 |
 | 2. Double-Q | §2.5 | `dqn_agent.py` | LunarLander-v2 ≥ 200；MsPacman ≈ 1500 | | ⬜ |
 | 3. 超参敏感性 | §2.6 | 新增 yaml（无源码改动） | LunarLander 4 组设置同图 | | ⬜ |
 | 4. SAC 数据流 + bootstrapping | §3.1–3.2 | `run_sac.py` `sac_agent.py` | InvertedPendulum Q 值稳定（不发散、不恒零） | | ⬜ |
@@ -159,10 +159,10 @@ double-Q 留到阶段 2。
 - [x] `dqn_agent.py` `get_action` —— ε-greedy ✅ 已验证（ε=0/0.5/1 三档）
 - [x] `dqn_agent.py` `update_critic` —— target 值 ✅ 手算用例验证
 - [x] `dqn_agent.py` `update_critic` —— 预测值与 loss ✅ 固定 target 收敛测试
-- [ ] `dqn_agent.py` `update` —— 调 critic 更新 + 按 `target_update_period` 更新 target
-- [ ] `run_dqn.py` 训练循环 —— 取 action
-- [ ] `run_dqn.py` 训练循环 —— 从 replay buffer 采样 `config["batch_size"]` 条
-- [ ] `run_dqn.py` 训练循环 —— 调 `agent.update`
+- [x] `dqn_agent.py` `update` —— 调 critic 更新 + 按 `target_update_period` 更新 target ✅
+- [x] `run_dqn.py` 训练循环 —— 取 action ✅
+- [x] `run_dqn.py` 训练循环 —— 从 replay buffer 采样 `config["batch_size"]` 条 ✅
+- [x] `run_dqn.py` 训练循环 —— 调 `agent.update` ✅
 
 ### 关键决定
 
@@ -232,6 +232,37 @@ n=9 那行取值范围缺了贪心下标，是「排除」真的生效的直接�
 
 q 值收敛到 5.0、loss → 0 ⇒ 梯度流通且方向正确。
 
+**CartPole 正式验收** —— `exp/CartPole-v1_dqn_sd1_20260825_151358`
+
+```
+uv run src/scripts/run_dqn.py -cfg experiments/dqn/cartpole.yaml --eval_interval 2500 --no_gpu
+```
+
+| 指标 | 结果 |
+|---|---|
+| 40 个评估点中 `Eval_AverageReturn = 500` | **10 次** |
+| 首次达到 500 | **step 10000** |
+| step ≥ 50000 的 20 个评估点 | 均值 370.4，其中 9 次满分 |
+| 最终评估点（97500） | 500.0 |
+
+PDF 要求「训练中**至少一次**到 500」，达标。
+
+⚠️ **曲线中段会大幅回落**（15000–50000 掉到 80~200，末段 90000–95000 也掉到 ~100），
+这是 DQN 常态不是 bug：ε 那时还在 0.4 以上、buffer 里旧策略数据占比高、
+target 每 1000 步才同步。**别看到掉下来就以为写错了** —— 验收标准写的是「至少一次」。
+
+**GPU vs CPU 实测（20000 步）**
+
+| | it/s |
+|---|---|
+| CPU (`--no_gpu`) | **1038** |
+| GPU (RTX 4090) | 871 |
+
+CPU 快 19%。hw2 的结论成立但没那么夸张（hw2 是 1.7×）—— DQN 每步都做一次
+batch=128 的梯度更新，GPU 的活比 hw2 的 PG 多，差距被拉近。瓶颈仍是 `env.step()`
+和逐步 `get_action` 的 host→device 拷贝。**CartPole 用 `--no_gpu`**；
+LunarLander 网络宽 4 倍（256）届时重测；MsPacman 是 CNN，必然用 GPU。
+
 > TODO
 
 ### 踩的坑
@@ -257,6 +288,26 @@ q 值收敛到 5.0、loss → 0 ⇒ 梯度流通且方向正确。
 **⑤ T1.5 改名漏了下游引用** —— 把 `target_values` 改成 `target_values_B` 后，
 方法末尾返回字典里的 `target_values.mean()` 没跟着改，`NameError`。
 改名后 `grep` 一遍旧名字。
+
+**⑥ `torch.randint` 默认建在 CPU 上** —— `get_action` 里 `greedy_action` 在 GPU，
+`offset` 在 CPU，相加抛 `Expected all tensors to be on the same device`。
+要传 `device=greedy_action.device`。
+**单测时我用的是 `use_gpu=False`，纯 CPU 跑不出这个 bug** —— 冒烟测试才抓到。
+教训：设备相关的 bug，CPU 单测一律看不见。
+
+**⑦ `run_dqn.py` 里调错了方法** —— 一度写成 `agent.update_critic(...)`，绕过了
+`agent.update(...)`。后果不是报错而是**静默失效**：target 网络永远停在随机初始化状态，
+课件第 5 步从未执行。`update_critic` 的签名没有 `step`，这是个提示。
+
+**⑧ `get_action` 忘了传 `epsilon`** —— 走默认 `0.0` ⇒ 全程纯贪心、零探索。
+`exploration_schedule` 和讲义式 ε-greedy 全部白写。
+判据：`run_dqn.py` 里 `epsilon = exploration_schedule.value(step)` 算出来的变量
+如果没有任何地方用到，就是漏传了。
+
+**⑨ `WANDB_MODE=disabled` 在这份代码里不生效** —— `run_dqn.py:224` 显式传了
+`mode="online"` 给 `wandb.init()`，**显式参数优先级高于环境变量**。
+和 hw2 不同（hw2 的脚本里 `WANDB_MODE=disabled` 是管用的）。
+所以每次冒烟测试都会在 W&B 上留一个 run，得手动清理。
 
 ### 遗留疑问
 
