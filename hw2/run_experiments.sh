@@ -5,6 +5,7 @@
 #   ./run_experiments.sh exp2          # 实验 2：HalfCheetah ×5   （阶段 2 之后）
 #   ./run_experiments.sh exp3          # 实验 3：LunarLander ×5   （阶段 3 之后）
 #   ./run_experiments.sh exp4          # 实验 4：InvertedPendulum 默认基线
+#   ./run_experiments.sh exp4-l9       # 实验 4：L9 正交表调参（9 组）
 #
 #   PARALLEL=0 ./run_experiments.sh exp1     # 改成串行（默认并行）
 #   WANDB_MODE=disabled ./run_experiments.sh exp1   # 不传 wandb
@@ -29,6 +30,7 @@ case "$SUITE" in
   exp2) HW2_WANDB_GROUP="exp2_halfcheetah" ;;
   exp3) HW2_WANDB_GROUP="exp3_lunarlander_gae" ;;
   exp4) HW2_WANDB_GROUP="exp4_pendulum_tuning" ;;
+  exp4-l9) HW2_WANDB_GROUP="exp4_pendulum_L9" ;;
   *)
     sed -n '2,20p' "$0"
     exit 1
@@ -89,8 +91,34 @@ case "$SUITE" in
         go $LL --gae_lambda $lam --exp_name "lunar_lander_lambda$lam"
     done
     ;;
-  exp4)   # 阶段 4 —— 默认基线（§4.4 的图要用，跑完别删）；调参的 run 自己另外加
+  exp4)   # 阶段 4 调参 —— 见 REPORT §4.1
+    # 默认基线（§4.4 的图要用，跑完别删）
     go --env_name InvertedPendulum-v4 -n 100 -b 5000 -eb 1000 --exp_name pendulum
+    ;;
+
+  exp4-l9)
+    # L9(3^4) 正交表：4 个因子 x 3 水平，9 组估主效应（全因子要 81 组）。
+    #   A discount   0.95 / 0.99 / 1.0
+    #   B 网络 -l/-s  2,32 / 2,64 / 3,128
+    #   C batch -b   500 / 1000 / 2000
+    #   D lr         5e-3 / 1e-2 / 2e-2
+    # 固定：-rtg -na（实验 1 证实几乎白拿）
+    #      --use_baseline --gae_lambda 0.99（实验 3 证实；InvertedPendulum 与
+    #      LunarLander 同为 horizon=1000。注意 --gae_lambda 不配 --use_baseline
+    #      会被【静默忽略】—— GAE 分支在 critic is not None 里面）
+    # 每组预算固定 150K 步（-n = 150000/-b），否则「首次到 1000 的步数」不可比。
+    IP="--env_name InvertedPendulum-v4 -eb 1000 -rtg -na --use_baseline --gae_lambda 0.99"
+    #        discount  -l  -s     -b   -n    -lr
+    l9_run() { go $IP --discount $1 -l $2 -s $3 -b $4 -n $5 -lr $6 --exp_name "pendulum_L9_$7"; }
+    l9_run 0.95 2 32   500 300 5e-3 1
+    l9_run 0.95 2 64  1000 150 1e-2 2
+    l9_run 0.95 3 128 2000  75 2e-2 3
+    l9_run 0.99 2 32  1000 150 2e-2 4
+    l9_run 0.99 2 64  2000  75 5e-3 5
+    l9_run 0.99 3 128  500 300 1e-2 6
+    l9_run 1.0  2 32  2000  75 1e-2 7
+    l9_run 1.0  2 64   500 300 2e-2 8
+    l9_run 1.0  3 128 1000 150 5e-3 9
     ;;
 esac
 

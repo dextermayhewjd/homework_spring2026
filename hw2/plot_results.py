@@ -7,6 +7,7 @@ PDF §3.2 的要求：
   - y 轴 average return，x 轴 **Train_EnvstepsSoFar**（不是迭代数）
 """
 import csv, glob, os, sys
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -96,6 +97,49 @@ def plot(names, labels, title, subtitle, outfile, ycol="Eval_AverageReturn",
     plt.close(fig); print(f"  OK  report/{outfile}")
 
 
+def plot_l9_grid(outfile="exp4_l9_grid.png"):
+    """L9 九组画成 3x3 small multiples —— 9 条曲线叠一张读不了。
+
+    每格标注：首次到 1000 的步数、达标后 ≥950 的占比。
+    """
+    L9 = [(1,1,1,1),(1,2,2,2),(1,3,3,3),(2,1,2,3),(2,2,3,1),(2,3,1,2),(3,1,3,2),(3,2,1,3),(3,3,2,1)]
+    LV = [{1:"γ=0.95",2:"γ=0.99",3:"γ=1.0"}, {1:"2/32",2:"2/64",3:"3/128"},
+          {1:"b500",2:"b1000",3:"b2000"}, {1:"lr5e-3",2:"lr1e-2",3:"lr2e-2"}]
+    fig, axes = plt.subplots(3, 3, figsize=(11, 8), dpi=170, sharex=True, sharey=True)
+    fig.patch.set_facecolor(SURFACE)
+    for k, (cfg, ax) in enumerate(zip(L9, axes.flat), 1):
+        ax.set_facecolor(SURFACE)
+        got = load(find(f"pendulum_L9_{k}"))
+        x, y = got
+        i = next((j for j, v in enumerate(y) if v >= 1000), None)
+        hit = f"{int(x[i]):,} 步" if i is not None else "未达到"
+        hold = (np.array(y[i:]) >= 950).mean() if i is not None else 0.0
+        col = SERIES[0] if i is not None and hold >= 0.65 else (SERIES[3] if i is not None else SERIES[1])
+        ax.plot(x, y, color=col, lw=1, alpha=0.3, zorder=2)
+        ax.plot(x, smooth(y, 8), color=col, lw=1.8, zorder=3)
+        if i is not None:
+            ax.axvline(x[i], color=GRID, lw=1, zorder=1)
+        ax.axhline(1000, color=GRID, lw=1, ls=(0, (4, 3)), zorder=1)
+        ax.set_title(f"#{k}  " + " ".join(LV[c][cfg[c]] for c in range(4)),
+                     fontsize=8, color=INK, loc="left", pad=3)
+        ax.text(0.98, 0.06, f"首次 {hit}\n达标后≥950 {hold:.0%}", transform=ax.transAxes,
+                fontsize=7, color=INK2, ha="right", va="bottom")
+        ax.grid(axis="y", color=GRID, lw=0.8); ax.set_axisbelow(True)
+        for s in ("top", "right"): ax.spines[s].set_visible(False)
+        for s in ("left", "bottom"): ax.spines[s].set_color(GRID)
+        ax.tick_params(colors=INK2, labelsize=7, length=0)
+    fig.suptitle("InvertedPendulum-v4  L9 正交表九组学习曲线", fontsize=13,
+                 color=INK, x=0.01, ha="left", fontweight="bold")
+    fig.text(0.01, 0.945, "蓝=达标且稳（达标后≥950 占比 ≥65%）  黄=达标但不稳  橙=未达标；"
+             "竖线为首次到 1000，虚线为满分 1000", fontsize=8, color=INK2, ha="left")
+    fig.supxlabel("Train_EnvstepsSoFar（环境步数）", fontsize=9, color=INK2)
+    fig.supylabel("Eval_AverageReturn", fontsize=9, color=INK2)
+    fig.tight_layout(rect=(0.01, 0.01, 1, 0.93))
+    os.makedirs("report", exist_ok=True)
+    fig.savefig(os.path.join("report", outfile), facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig); print(f"  OK  report/{outfile}")
+
+
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "exp1"
     if which == "exp1":
@@ -145,5 +189,7 @@ if __name__ == "__main__":
              "LunarLander-v2 GAE λ 扫描",
              "λ=0 退化成单步 TD（式 16），λ=1 退化成纯 Monte Carlo；粗线为 10 点滑动平均，淡线为原始值",
              "exp3_lambda_sweep.png", smooth_w=10)
+    elif which == "exp4-l9":
+        plot_l9_grid()
     else:
         raise SystemExit(f"未知实验：{which}")
