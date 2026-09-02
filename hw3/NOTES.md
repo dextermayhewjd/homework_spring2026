@@ -27,7 +27,7 @@
 | 1. 基础 DQN | §2.4 | `dqn_agent.py` `run_dqn.py` | CartPole-v1 训练中**至少一次** eval return = 500 | 本次 | ✅ 40 个评估点中 10 次 500 |
 | 2. Double-Q | §2.5 | `dqn_agent.py` | LunarLander-v2 ≥ 200；MsPacman ≈ 1500 | 本次 | ✅ LunarLander 17 次≥200；MsPacman 最好 1924 |
 | 3. 超参敏感性 | §2.6 | 新增 yaml（无源码改动） | LunarLander 4 组设置同图 | | ⬜ |
-| 4. SAC 数据流 + bootstrapping | §3.1–3.2 | `run_sac.py` `sac_agent.py` | InvertedPendulum Q 值稳定（不发散、不恒零） | | ⬜ |
+| 4. SAC 数据流 + bootstrapping | §3.1–3.2 | `run_sac.py` `sac_agent.py` | InvertedPendulum Q 值稳定（不发散、不恒零） | 本次 | ✅ q=5.06±0.27，闭式解预测 2.8~5.5 |
 | 5. 熵 bonus | §3.3 | `sac_agent.py` | InvertedPendulum entropy → ≈ log 2 ≈ 0.69 | | ⬜ |
 | 6. 重参数化 actor | §3.4 | `sac_agent.py` | InvertedPendulum ≈ 1000；HalfCheetah ≥ 6000 | | ⬜ |
 | 7. 自动温度 | §3.5 | `sac_agent.py` | InvertedPendulum 仍 ≈ 1000；HalfCheetah autotune 对比图 | | ⬜ |
@@ -508,28 +508,49 @@ PDF 原话：`run_sac.py` 的 TODO「应该跟你的 DQN run 脚本长得差不�
 
 PDF §3.1 分了两档。**必读**（"you'll need to take a look at"）：
 
-- [ ] `src/scripts/run_sac.py` —— 主训练循环
-- [ ] `src/agents/sac_agent.py` —— 待实现的结构
+- [x] `src/scripts/run_sac.py` —— 主训练循环
+- [x] `src/agents/sac_agent.py` —— 待实现的结构
 
 **可能有用**（"you may also find useful"）：
 
-- [ ] `src/networks/critics.py` `StateActionCritic` —— 注意和 `DQNCritic` 的区别：
+- [x] `src/networks/critics.py` `StateActionCritic` —— 注意和 `DQNCritic` 的区别：
       DQN critic 是 obs → 每个动作一个 Q；SAC critic 是 (s, a) → 单个 Q
-- [ ] `src/configs/sac_config.py` —— 基础配置和超参清单
-- [ ] `experiments/sac/*.yaml` —— 各实验的配置
+- [x] `src/configs/sac_config.py` —— 基础配置和超参清单
+- [x] `experiments/sac/*.yaml` —— 各实验的配置
 
 > ⚠️ PDF 里这两个路径是**过时的**：写的是 `src/networks/critic.py`（实际 `critics.py`，有 s）
 > 和 `src/env_configs/sac_config.py`（实际 `src/configs/sac_config.py`，没有 `env_` 前缀）。
 
 ### TODO 清单
 
-- [ ] `run_sac.py` —— 选动作（`TODO(Section 3.1)`）
-- [ ] `run_sac.py` —— 采样 `config["batch_size"]` 条（`TODO(Section 3.1)`）
-- [ ] `sac_agent.py` `update_critic` —— 从 actor 采样并算 next Q（`TODO(Section 3.2)`）
-- [ ] `sac_agent.py` `update_critic` —— 算 target Q（`TODO(Section 3.2)`）
-- [ ] `sac_agent.py` `update_critic` —— 更新 critic（`TODO(Section 3.2)`）
-- [ ] `sac_agent.py` `update` —— 更新 critic `num_critic_updates` 次（`TODO(Section 3.2)`）
-- [ ] `sac_agent.py` `update` —— hard / soft target 更新二选一（`TODO(Section 3.2)`）
+- [x] `run_sac.py:65` —— 选动作（`TODO(Section 3.1)`）✅ `agent.get_action(observation=...)`
+- [x] `run_sac.py:90` —— 采样 `config["batch_size"]` 条（`TODO(Section 3.1)`）✅ 对标 `run_dqn.py:131-144`
+- [x] `sac_agent.py:206` `update_critic` —— 从 actor 采样并算 next Q（`TODO(Section 3.2)`）
+- [x] `sac_agent.py:227` `update_critic` —— 算 target Q（`TODO(Section 3.2)`）
+- [x] `sac_agent.py:236,240` `update_critic` —— 预测 + loss（`TODO(Section 3.2)`）
+- [x] `sac_agent.py:367` `update` —— 更新 critic `num_critic_updates` 次（`TODO(Section 3.2)`）
+- [x] `sac_agent.py:394` `update` —— hard / soft target 更新二选一（`TODO(Section 3.2)`）
+
+### 关键决定
+
+**`max` 换成单样本期望，是这一节唯一的数学改动。**
+
+```
+DQN:   y = r + γ(1-d) · max_a' Q_θ̄(s', a')       枚举 A 个动作取最大，O(A)
+SAC:   y = r + γ(1-d) · E_{a'~π}[Q_φ'(s', a')]    对策略取期望
+                        ↑ 代码里用【一个采样】估计
+```
+
+连续动作下 A = ∞，输出层宽度不可能是无穷 —— 所以 critic 的形状必须从
+`obs -> (B, A)`（`DQNCritic`，动作在**输出端**）改成 `(obs, acs) -> (B,)`
+（`StateActionCritic`，动作在**输入端**，`critics.py:41` 的 `input_size = ob_dim + ac_dim`）。
+形状一改，`max` 就没了着落，因为取 max 得先枚举，而"不用枚举"正是改形状的目的。
+完整的动机链见 `FROM_DQN_TO_SAC.md`。
+
+**`.sample()` 而不是 `.rsample()`**（`:207`）—— 这段在 `torch.no_grad()` 里，
+目标值不能带 actor 的梯度。实测反传后 `actor` 的梯度总量为 0。
+⚠️ 同一个选择在阶段 5（`entropy()`）和阶段 6（`actor_loss_reparametrize`）会再出现两次，
+**那两处答案相反**，要用 `.rsample()`。
 
 ### 验证记录
 
@@ -540,11 +561,184 @@ PDF §3.1 分了两档。**必读**（"you'll need to take a look at"）：
 > 此时**还没有 actor**，return 不会高。看的是 **Q 值是否稳定在一个合理值** ——
 > 发散到无穷或恒为零都说明有 bug。PDF 说这一节没有交付物，过了就往下走。
 
-> TODO
+#### 这个 sanity check 的设计：把无解的问题变成有闭式解的题
+
+「我的 SAC 写对了吗」没法直接检验 —— 没有 ground truth 可对。
+这次 run 的做法是**把 actor 冻住**（`:373` 的 `actor_info = {}` 还锁着），问题就变了：
+
+```
+原问题：  我的 SAC 能学好策略吗？                      ← 无标准答案，只能"看着像"
+冻住后：  critic 能正确评估【一个固定策略】π₀ 吗？      ← 策略评估，有闭式解
+```
+
+而 InvertedPendulum 的奖励结构简单到能笔算 —— **这就是作业用它而不是 HalfCheetah
+做 sanity check 的原因**。
+
+#### 闭式解
+
+```
+每步 reward = +1，杆倒即终止。某状态还剩 k 步寿命：
+
+    Q(s,a) = 1 + γ + γ² + ... + γ^(k-1) = (1 - γ^k)/(1 - γ)
+
+实测固定策略的存活步数（各 200 条 rollout）：
+    均匀随机动作     L = 6.50  (min 3, max 22)
+    未训练的 actor   L = 5.67  (min 3, max 19)
+
+    k = 5.7（episode 开头）        ->  Q ≈ 5.5
+    k ≈ 2.8（buffer 里的平均状态）  ->  Q ≈ 2.8
+    => 正确答案落在【个位数】
+```
+
+#### 失败指纹：每个 bug 把 Q 推到一个可区分的确切数值
+
+**这才是检测机制** —— 不是"看着不对劲"，而是不同错误产生互相区分得开的数：
+
+| 若这里写错 | 数学后果 | `q_values` 会收敛到 |
+|---|---|---|
+| **`(1-d)` 漏了/失效** | 级数永不截断 | **1/(1-γ) = 100** |
+| loss 没 backward / optimizer 没 step | 参数不动 | **≈ 0 且完全不变** |
+| target 用了在线网络 `self.critic` | 靶子跟着枪跑，正反馈 | **→ ∞ 发散** |
+| target 从不同步 | 靶子永远是随机网络 | 随机常数，且 target/q 的差不收敛 |
+| γ 传错 | 级数和改变 | 系统性偏离（γ=0.9 → Q≈4.4） |
+
+`100` 和 `0` 不是"偏大偏小"，是**特定错误的确切数学后果**，所以能一次性排除。
+
+#### 正式验收 —— `exp/InvertedPendulum-v4_sac_sd1_20260902_143509`
+
+```
+   step   q_values  target_values  critic_loss
+   5000      0.056          1.050       0.9907    ← 起点接近 0
+   6000      3.586          3.502       0.7722    ← 1000 步内爬起来
+   8000      5.201          5.051       1.8403    ← 到位
+  15000      5.160          4.903       2.1198
+  25000      4.903          4.953       1.7770
+  35000      4.589          4.480       1.8285
+  49000      4.923          4.950       2.5657
+```
+
+| 判据 | 预期 | 实测 | |
+|---|---|---|---|
+| 收敛到合理值 | 闭式解 2.8 ~ 5.5 | **5.061 ± 0.270**（末 20%） | ✅ |
+| 不发散 | — | step≥10000 斜率 4.65e-07/step，R²=0.001，\|t\|=0.15 | ✅ |
+| 不恒零 | ≠ 0 | 0.056 → 3.6（1000 步内） | ✅ |
+| **`(1-d)` 生效** | ≠ 100 | 5.06，差 20 倍 | ✅ |
+| target 贴住 q | — | 5.103 vs 5.061，**差 0.041**（0.8%） | ✅ 回归收敛 |
+
+第二层判据（`target_values` vs `q_values`）验的是**回归本身收敛了没有**，
+和"数值对不对"相互独立：即使 Q 碰巧对，两条持续背离就说明
+`loss.backward()` → `optimizer.step()` 这条链没生效。
+
+#### 第三层：验证前提本身（actor 真的冻住了吗）
+
+前两层都建立在"actor 是冻的"这个前提上，前提不成立就不是在测策略评估。
+`Eval_AverageReturn` 的趋势检验 |t|=1.99（n=10，卡在显著性边界），光看统计说不清，
+所以直接查参数 —— 把 `agent.pt` 和**同 seed(=1) 全新初始化**逐张量比：
+
+```
+actor.net.{0,2,4}.{weight,bias}   最大差值 0.000e+00     完全相同 6/6
+critics.0.net.0.weight（对照组）   最大差值 1.690e+00
+critics.0.net.2.weight（对照组）   最大差值 2.733e+00
+```
+
+跑了 5 万步 actor 一个比特没动 ⇒ Eval return 那点上升（5.4→7.6，峰值 11.9）
+纯粹是每个评估点只有 10 条轨迹的采样噪声（该策略的 episode 长度分布 min 3 / max 19）。
+
+#### 这次 run 测不到什么
+
+```
+熵 bonus          :213 的 TODO 是空的 → 这次跑的是【无熵】版本
+                  （yaml 里 use_entropy_bonus: true，但代码没实现，不崩也不生效）
+actor 更新         :373 的 actor_info = {} 锁着
+clipped double-Q  num_critic_networks=1 + backup_type=mean
+                  → q_backup_strategy 的 "min" 分支（现仍是 next_qs = None）走不到，所以不崩
+自动温度           这个 yaml 里没开
+hard target 更新   六个 sac yaml 全是 soft
+                  → :394 的 step % period 分支【整个作业都不会被执行】
+```
+
+一句话总结这个 sanity check 的设计：
+**冻结一半系统，让剩下的一半退化成有闭式解的问题，再用闭式解当标尺。**
 
 ### 踩的坑
 
-> TODO
+**① `=` 写成 `:`，把 `torch.distributions.Distribution` 整个覆盖掉** —— 想写类型标注，
+结果写成了链式赋值：
+
+```python
+next_action_distribution = torch.distributions.Distribution = self.actor(next_obs)
+#                        ↑ 等号，不是冒号 ⇒ 两个名字都被赋成那个分布对象
+```
+
+实测后果：`torch.distributions.Distribution` 从类变成了一个 `Normal` 实例，
+`isinstance(x, Distribution)` 抛 `TypeError: arg 2 must be a type`。
+**而且不会立刻报错**，要等别处有人做 isinstance 才炸。
+
+**② `1 - done` 抛 RuntimeError** —— 和阶段 1 的坑①**完全一样**，隔了一个作业阶段又踩了。
+`done` 是 `torch.bool`（`replay_buffer.py:50-51` 的 `np.array(bool)`），
+必须 `1 - done.float()`。
+
+**③ `nn.MSELoss(a, b)` 不是"算 MSE"，是"造一个 MSELoss 模块"** ——
+`a`/`b` 被当成构造参数 `size_average`/`reduce`，报的错完全不指向真实原因：
+`RuntimeError: Boolean value of Tensor with more than one value is ambiguous`。
+
+```
+nn.MSELoss        是 <class 'type'>                          ← 类
+self.critic_loss  是 <class 'torch.nn.modules.loss.MSELoss'>  ← 实例，:97 已经造好了
+```
+
+**要调用的是 `:97` 那个已经造好的实例。** 阶段 1 的坑③也是围着 `self.critic_loss` 转的，
+同一个对象、两种不同的误用方式。
+
+**④ 取模的两个操作数写反** —— 写成 `self.target_update_period % step`，正确是
+`step % self.target_update_period`（`dqn_agent.py:161` 自己写过一模一样的）。
+后果不是"差不多"：
+
+```
+K = 1000 时，K % step == 0 的 step:  [1,2,4,5,8,10,20,25,40,50,100,125,200,250,500,1000]
+  → 全挤在前 1000 步；step > 1000 之后 K % step 恒等于 K，永远不为 0
+  → 【1000 步之后 target 再也不更新】
+step % K == 0 的 step: [1000, 2000, 3000, 4000, 5000]  ← 正确
+另外 step=0 时 K % step 直接 ZeroDivisionError
+```
+
+**⑤ 判据挑错了字段** —— 第一版把分支条件写成 `if self.auto_tune_temperature:`。
+那是 §3.5 的**温度自动调节**开关，和 target 更新毫无关系。
+正确判据 `:385-386` 的注释已经直接写了：看 `target_update_period` /
+`soft_target_update_rate` **哪个是 `None`**，这个"恰好一个非 None"的性质由
+`sac_config.py:128-133` 保证（yaml 的 `use_soft_target_update` 把其中一个掐成 `None`），
+`sac_agent.py:51-53` 的 assert 兜底。**所以只判断其中一个就够，`and` 是冗余的。**
+
+**⑥ 少写一个「每 K 步」的条件 = 等于没有 target 网络** —— hard 分支最初漏了取模判断，
+变成每步硬拷贝。实测 target 与 online 的最大参数差**全程为 0.00000**：
+目标 y 里的 `Q_target` 就是正在被优化的那个 `Q` 本身，靶子跟着枪动。
+这不是"更新太勤"，是 target 网络机制**整个失效**。
+
+**⑦ wandb 的 `~/.netrc` 里存了一个坏 key** —— 提示里选 (2)「Use an existing account」后
+粘贴的字符串有 **168 个字符**（wandb 的 API key 是 **40 位十六进制**），
+于是 wandb 认为"已配置 key"、不再提示，但认证返回
+`401 {"message":"user is not logged in"}`，崩在 `run_sac.py:175` 的 `make_logger`，
+**比训练循环还早**。修法：`wandb login --relogin`，只复制 https://wandb.ai/authorize
+页面上那 40 个字符。
+另注（延续阶段 1 的坑⑨）：`WANDB_MODE=offline` / `disabled` **都不生效**，
+因为 `mode="online"` 是显式传给 `wandb.init()` 的，优先级高于环境变量。
+
+### 遗留疑问
+
+- **`q_values` 收敛到 5.06，比按 buffer 状态分布算的 3.5 高约 1.4 倍。**
+  按均匀采样 buffer、episode 长 L≈6.5 算，平均剩余寿命 (L+1)/2 ≈ 3.75 ⇒ Q ≈ 3.7。
+  实测偏高。可能是函数逼近误差、也可能是 buffer 里前 1000 步纯随机段的分布偏移。
+  没深究 —— 闭式解本来就只用来定**量级**，不是精确对表。若阶段 8 讨论高估偏差时
+  需要一个基线，回来把这个差距算清楚。
+- **hard target 更新分支零覆盖。** 六个 sac yaml 全是 soft，`:394` 的
+  `step % period` 那一支只有单元测试跑过，**没有任何一次作业 run 会执行它**。
+  那里若有 bug，作业照样交得出去，但代码是错的。
+- `exp/` 下留了两个空目录（`..._20260902_142642`、`..._20260902_143152`），
+  是 wandb 崩在 `make_logger` 时 `os.makedirs` 已经建好、训练还没开始造成的。
+  **打包 `submit.zip` 前要删。**
+- `run_sac.py:92-98` 和 `sac_agent.py:200-203` 各留了一个三引号草稿块。
+  不是 docstring（不在函数体首行），是裸字符串表达式，CPython 会当常量丢掉、零运行开销，
+  但会跟着 `submit.zip` 交上去。按 NOTES 开头定的分界线该删。
 
 ---
 
