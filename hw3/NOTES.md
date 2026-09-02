@@ -489,6 +489,10 @@ PDF 给的候选：learning rate / 网络结构 / exploration schedule / target 
 
 > 无现成 yaml，要自己加 3 个配置文件。这也是之后想加批量运行脚本（对标 `hw2/run_experiments.sh`）的地方。
 > 因子多到跑不完时的正交表设计见 `../hw2/ABLATION.md`。
+> 该文件已于 2026-09-02 续写后半篇：优化 vs 归因的分叉、随机搜索 vs 网格、
+> Successive Halving 在 RL 里为什么便宜有限（rung 0 必须晚于 `learning_starts`）、
+> 以及噪声底噪 σ 与 seed 数的预算公式。**§2.6 只是单因子 OFAT，用不到正交表**；
+> 多因子那套是超纲内容，真要跑再翻。
 
 ### 选了哪个超参 & 为什么
 
