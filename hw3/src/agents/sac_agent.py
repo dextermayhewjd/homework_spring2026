@@ -257,7 +257,9 @@ class SoftActorCritic(nn.Module):
 
         # TODO(Section 3.3): Compute the entropy of the action distribution.
         # Note: Think about whether to use .rsample() or .sample() here...
-        return None
+        actions = action_distribution.rsample()
+        entropy = - action_distribution.log_prob(actions)
+        return entropy
         # ENDTODO
 
     def actor_loss_reparametrize(self, obs: torch.Tensor):

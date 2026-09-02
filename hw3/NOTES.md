@@ -748,12 +748,112 @@ step % K == 0 的 step: [1000, 2000, 3000, 4000, 5000]  ← 正确
 
 ## 阶段 5 — 熵 bonus（PDF §3.3）
 
+### 前置理解
+
+> 动手前先把符号和「为什么加两处」搞清楚，否则写出来能跑但方向是反的。
+
+#### ① 符号：要的是 `log π` **小**，不是大
+
+```
+H(π(·|s)) = E_{a~π}[ -log π(a|s) ]        ← 定义里有个负号
+
+策略越分散 -> 单个动作密度 π(a|s) 越小 -> log π 越【负】 -> -log π 越【大】 -> 熵越大
+```
+
+实测（1 维 tanh 压过的高斯，mean=0，各 20 万样本）：
+
+| std | 密度 π(a\|s) | log π | **-log π（熵）** | 策略形态 |
+|---|---|---|---|---|
+| 0.01 | 28.225 | +3.187 | **-3.187** | 几乎确定性 |
+| 0.10 | 2.834 | +0.894 | **-0.894** | 几乎确定性 |
+| 0.50 | 0.644 | -0.499 | **+0.500** | 中等分散 |
+| 1.00 | 0.524 | -0.671 | **+0.670** | 中等分散 |
+
+一度想成「要让 log π 足够大」——**反了**。确定性策略的 `log π` 是**正的大数**（密度尖峰），熵是负的。
+
+#### ② 熵对 std 不单调，峰值 ≈ log 2 出现在 std ≈ 0.9
+
+```
+    std     -log π (熵)
+    0.5         0.5004   ##########################################
+    0.7         0.6500   ##############################################
+    0.9         0.6834   ###############################################  ← 峰
+    1.0         0.6702   ##############################################
+    1.5         0.4216   ########################################
+    2.0         0.0020   ##############################
+    3.0        -1.0973   ##
+
+理论上限 log 2 = 0.6931（动作被 tanh 压进 (-1,1)，长度 2 的区间上均匀分布的微分熵）
+```
+
+**两端都会掉**：std 太小 → 几乎确定性；**std 太大 → tanh 把大方差样本挤到 ±1 两个边界上堆成两坨，反而更集中**。后半句反直觉，但正是 tanh 变换的后果。
+
+⇒ **PDF 说的「熵涨到 ≈0.69」，等价于「actor 学会把 std 调到 ≈1」。** 验收时可以直接看这个。
+
+#### ③ 为什么 actor 和 critic 两处都要加 —— 理由不同
+
+```
+actor 目标   J_π = Q(s,a) + β·H(π(·|s))                       ← 第一处
+critic 目标  y = r + γ(1-d)·[ Q_φ'(s',a') + β·H(π(·|s')) ]     ← 第二处
+```
+
+第一处好理解：actor 一边追 Q 一边追熵，β 是汇率。
+
+第二处 PDF 只写了 "To make sure entropy is also factored into the Q-function"。
+它真正的含义是 **SAC 重新定义了 Q 的语义**：
+
+```
+标准 Q:   Q(s,a) = E[ Σ γ^t · r_t                     ]
+soft  Q:  Q(s,a) = E[ Σ γ^t · (r_t + β·H(π(·|s_t)))   ]
+                                    └─ 熵被当成【奖励的一部分】
+```
+
+只在 actor loss 里加、不加进 target 的话，熵只影响**当前这一步**，不会通过 bootstrap
+传到未来。加进 target 之后 agent 才会偏好那些**将来仍有余地保持随机**的状态。
+
+代码结构印证这是两个独立决定 —— **有两个开关**：
+
+```python
+:37   use_entropy_bonus: bool = False    总开关
+:39   backup_entropy:    bool = True     只管 critic target 那一处
+
+:211  if self.use_entropy_bonus and self.backup_entropy:    critic 侧，两个都要
+:295  # TODO ... update_actor                               actor 侧
+```
+
+⚠️ **`:295` 那处骨架没给 `if`。** critic 那边 `:211` 的判断是白送的，actor 这边要自己想清楚该用哪个开关守。
+
+#### ④ 为什么这一节的验收判据能是一个**确切的数**
+
+`actor_loss_reparametrize`（`:263-287`）里 §3.4 的三个占位符还没换：
+
+```python
+:264   action   = torch.zeros(...)      # placeholder
+:269   q_values = torch.zeros(...)      # placeholder
+:277   loss     = torch.tensor(0.0)     # placeholder ← 关键
+```
+
+所以在 `:295` 给 loss 减去熵项之后，**actor 的总损失只剩熵这一项**：
+
+```
+L_actor = 0 - β·H(π) = -β·H(π)
+```
+
+最小化它 = **纯粹最大化熵**，没有「最大化 Q」的力量往回拉 ⇒ 熵一路涨到上限 log 2。
+
+**又是阶段 4 那个套路：冻住一半系统，让剩下的一半退化成有闭式解的问题。**
+（阶段 4 冻的是 actor，让 critic 退化成策略评估；这里冻的是 §3.4 的 Q 项，
+让 actor 退化成纯熵最大化。）
+
 ### TODO 清单
 
-- [ ] `sac_agent.py` `entropy()` —— 近似熵（`TODO(Section 3.3)`）
-- [ ] `sac_agent.py` `update_critic` —— target 值里加熵项（`TODO(Section 3.3)`）
-- [ ] `sac_agent.py` `update_actor` —— actor loss 里加熵项（`TODO(Section 3.3)`）
-- [ ] `sac_agent.py` `update` —— 启用 `self.update_actor()`（`TODO(Section 3.3)`）
+> **顺序不能乱**：`entropy()` 必须最先写 —— 一旦解锁 `:373` 的 actor 更新，就会走到
+> `:287` 的 `torch.mean(self.entropy(...))`，`entropy()` 还返回 `None` 的话直接崩。
+
+- [x] `sac_agent.py:258` `entropy()` —— 近似熵（`TODO(Section 3.3)`）✅ `.rsample()` + `-log_prob`，五项验证见下
+- [ ] `sac_agent.py:213` `update_critic` —— target 值里加熵项（`TODO(Section 3.3)`）
+- [ ] `sac_agent.py:295` `update_actor` —— actor loss 里减熵项（`TODO(Section 3.3)`）
+- [ ] `sac_agent.py:373` `update` —— 启用 `self.update_actor()`（`TODO(Section 3.3)`）← 最后
 
 ### 验证记录
 
